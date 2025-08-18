@@ -81,6 +81,262 @@ class ExtractedContent:
     file_type: str
 
 
+class AttachmentReader:
+    """
+    Modular attachment reader with custom processing functions for different file types
+    
+    ML Enhancement Opportunities:
+    - Automatic attachment classification using content analysis
+    - Smart extraction based on attachment importance scoring
+    - Content-aware processing pipeline selection
+    - Anomaly detection for suspicious attachments
+    """
+    
+    def __init__(self, file_processor_instance=None):
+        """
+        Initialize attachment reader
+        
+        Args:
+            file_processor_instance: Instance of FileProcessor for content processing
+        """
+        self.file_processor = file_processor_instance
+        self.custom_processors = {}
+        self.supported_types = {
+            '.pdf': self._process_pdf_attachment,
+            '.docx': self._process_docx_attachment,
+            '.xlsx': self._process_excel_attachment,
+            '.xls': self._process_excel_attachment,
+            '.csv': self._process_csv_attachment,
+            '.txt': self._process_text_attachment,
+            '.jpg': self._process_image_attachment,
+            '.jpeg': self._process_image_attachment,
+            '.png': self._process_image_attachment,
+            '.tiff': self._process_image_attachment,
+            '.bmp': self._process_image_attachment
+        }
+    
+    def register_custom_processor(self, file_extension: str, processor_function):
+        """
+        Register a custom processor function for specific file types
+        
+        Args:
+            file_extension: File extension (e.g., '.pdf', '.docx')
+            processor_function: Function that takes (file_path, metadata) and returns processed content
+        """
+        self.custom_processors[file_extension.lower()] = processor_function
+    
+    def read_attachment(self, attachment_data: bytes, filename: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Read and process attachment based on file type
+        
+        Args:
+            attachment_data: Raw attachment bytes
+            filename: Original filename with extension
+            metadata: Additional metadata about the attachment
+            
+        Returns:
+            Dict containing processed attachment content and metadata
+            
+        ML Enhancement Opportunities:
+        - Use deep learning for file type detection beyond extensions
+        - Implement content-based processing selection
+        - Add confidence scoring for processing results
+        """
+        if metadata is None:
+            metadata = {}
+        
+        result = {
+            "filename": filename,
+            "file_size": len(attachment_data),
+            "processed_content": None,
+            "processing_method": "none",
+            "errors": [],
+            "metadata": metadata
+        }
+        
+        try:
+            # Create temporary file for processing
+            file_ext = os.path.splitext(filename)[1].lower()
+            
+            with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
+                temp_file.write(attachment_data)
+                temp_file_path = temp_file.name
+            
+            try:
+                # Check for custom processor first
+                if file_ext in self.custom_processors:
+                    result["processed_content"] = self.custom_processors[file_ext](
+                        temp_file_path, metadata
+                    )
+                    result["processing_method"] = "custom"
+                
+                # Use built-in processors
+                elif file_ext in self.supported_types:
+                    result["processed_content"] = self.supported_types[file_ext](
+                        temp_file_path, metadata
+                    )
+                    result["processing_method"] = "built-in"
+                
+                else:
+                    # Try to process as text for unknown types
+                    result["processed_content"] = self._process_unknown_attachment(
+                        temp_file_path, metadata
+                    )
+                    result["processing_method"] = "fallback"
+                    
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
+                    
+        except Exception as e:
+            result["errors"].append(f"Processing error: {str(e)}")
+        
+        return result
+    
+    def _process_pdf_attachment(self, file_path: str, metadata: Dict[str, Any]) -> ExtractedContent:
+        """
+        Default PDF processing - can be overridden with custom processor
+        
+        ML Enhancement Opportunities:
+        - Document classification for PDF content routing
+        - Form field detection and extraction
+        - Invoice/receipt specific processing
+        - Table structure understanding with specialized models
+        """
+        if self.file_processor:
+            return self.file_processor._process_pdf(file_path)
+        else:
+            # Fallback processing without FileProcessor
+            return self._basic_pdf_processing(file_path)
+    
+    def _basic_pdf_processing(self, file_path: str) -> ExtractedContent:
+        """Basic PDF processing without full FileProcessor"""
+        text = ""
+        tables = []
+        metadata = {"pages": 0}
+        
+        if HAS_PYMUPDF:
+            try:
+                doc = fitz.open(file_path)
+                metadata["pages"] = len(doc)
+                
+                for page in doc:
+                    text += page.get_text() + "\n"
+                
+                doc.close()
+                
+                # Basic table detection
+                table_extractor = TableExtractor()
+                tables = table_extractor.detect_table_patterns(text)
+                
+            except Exception as e:
+                text = f"Error processing PDF: {str(e)}"
+        else:
+            text = "PyMuPDF not available for PDF processing"
+        
+        return ExtractedContent(
+            text=text,
+            tables=tables,
+            metadata=metadata,
+            file_type="pdf_attachment"
+        )
+    
+    def _process_docx_attachment(self, file_path: str, metadata: Dict[str, Any]) -> ExtractedContent:
+        """Process Word document attachments"""
+        if self.file_processor:
+            return self.file_processor._process_docx(file_path)
+        else:
+            return ExtractedContent(
+                text="DOCX processing requires FileProcessor instance",
+                tables=[],
+                metadata=metadata,
+                file_type="docx_attachment"
+            )
+    
+    def _process_excel_attachment(self, file_path: str, metadata: Dict[str, Any]) -> ExtractedContent:
+        """Process Excel attachments"""
+        if self.file_processor:
+            return self.file_processor._process_excel(file_path)
+        else:
+            return ExtractedContent(
+                text="Excel processing requires FileProcessor instance",
+                tables=[],
+                metadata=metadata,
+                file_type="excel_attachment"
+            )
+    
+    def _process_csv_attachment(self, file_path: str, metadata: Dict[str, Any]) -> ExtractedContent:
+        """Process CSV attachments"""
+        if self.file_processor:
+            return self.file_processor._process_csv(file_path)
+        else:
+            return ExtractedContent(
+                text="CSV processing requires FileProcessor instance",
+                tables=[],
+                metadata=metadata,
+                file_type="csv_attachment"
+            )
+    
+    def _process_text_attachment(self, file_path: str, metadata: Dict[str, Any]) -> ExtractedContent:
+        """Process text attachments"""
+        if self.file_processor:
+            return self.file_processor._process_text(file_path)
+        else:
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    text = f.read()
+                return ExtractedContent(
+                    text=text,
+                    tables=[],
+                    metadata=metadata,
+                    file_type="text_attachment"
+                )
+            except Exception as e:
+                return ExtractedContent(
+                    text=f"Error reading text file: {str(e)}",
+                    tables=[],
+                    metadata=metadata,
+                    file_type="text_attachment"
+                )
+    
+    def _process_image_attachment(self, file_path: str, metadata: Dict[str, Any]) -> ExtractedContent:
+        """Process image attachments with OCR"""
+        if self.file_processor:
+            return self.file_processor._process_image(file_path)
+        else:
+            return ExtractedContent(
+                text="Image processing requires FileProcessor instance with OCR",
+                tables=[],
+                metadata=metadata,
+                file_type="image_attachment"
+            )
+    
+    def _process_unknown_attachment(self, file_path: str, metadata: Dict[str, Any]) -> ExtractedContent:
+        """Fallback processing for unknown file types"""
+        try:
+            # Try to read as text
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                text = f.read()
+            
+            # Basic cleanup
+            text = ''.join(char for char in text if char.isprintable() or char in '\n\r\t')
+            
+            return ExtractedContent(
+                text=text,
+                tables=[],
+                metadata=metadata,
+                file_type="unknown_attachment"
+            )
+        except Exception as e:
+            return ExtractedContent(
+                text=f"Unable to process unknown file type: {str(e)}",
+                tables=[],
+                metadata=metadata,
+                file_type="unknown_attachment"
+            )
+
+
 class GraphApiEmailProcessor:
     """
     Microsoft Graph API email processor with delta query support
@@ -440,14 +696,17 @@ class OutlookMsgParser:
         return msg_data
     
     @staticmethod
-    def extract_pdf_attachments(file_path: str, output_dir: str = None, email_groups: List[str] = None) -> Dict[str, Any]:
+    def read_all_attachments(file_path: str, email_groups: List[str] = None, 
+                           attachment_reader: 'AttachmentReader' = None, 
+                           file_types: List[str] = None) -> Dict[str, Any]:
         """
-        Extract PDF attachments from MSG file and process them
+        Read and process all attachments from MSG file using modular attachment reader
         
         Args:
             file_path: Path to MSG file
-            output_dir: Directory to save extracted PDFs (optional)
             email_groups: Filter by specific email groups/senders
+            attachment_reader: AttachmentReader instance for processing
+            file_types: List of file extensions to process (e.g., ['.pdf', '.docx'])
             
         Returns:
             Dict containing attachment info and processed content
@@ -458,10 +717,11 @@ class OutlookMsgParser:
         - Extract structured data using specialized models
         """
         extraction_result = {
-            "pdf_attachments": [],
+            "attachments": [],
             "processed_content": [],
             "extraction_errors": [],
-            "email_info": {}
+            "email_info": {},
+            "summary": {}
         }
         
         try:
@@ -489,62 +749,67 @@ class OutlookMsgParser:
                 )
                 return extraction_result
             
+            # Initialize attachment reader if not provided
+            if attachment_reader is None:
+                attachment_reader = AttachmentReader()
+            
             # Process MSG file for attachments
             msg = extract_msg.Message(file_path)
             
-            # Create temp directory if no output specified
-            if output_dir is None:
-                output_dir = tempfile.mkdtemp(prefix="msg_pdf_extract_")
-            else:
-                os.makedirs(output_dir, exist_ok=True)
+            processed_count = 0
+            total_attachments = 0
             
-            pdf_count = 0
             for attachment in msg.attachments:
                 if hasattr(attachment, 'longFilename') and attachment.longFilename:
                     filename = attachment.longFilename
+                    file_ext = os.path.splitext(filename)[1].lower()
+                    total_attachments += 1
                     
-                    # Check if it's a PDF
-                    if filename.lower().endswith('.pdf'):
-                        try:
-                            # Extract the PDF
-                            pdf_path = os.path.join(output_dir, filename)
-                            attachment.save(output_dir)
-                            
-                            # Process the extracted PDF
-                            if HAS_PYMUPDF:
-                                from file_processor import FileProcessor  # Avoid circular import
-                                processor = FileProcessor()
-                                pdf_content = processor._process_pdf(pdf_path)
-                                
-                                extraction_result["pdf_attachments"].append({
-                                    "filename": filename,
-                                    "file_path": pdf_path,
-                                    "size": getattr(attachment, 'size', 0)
-                                })
-                                
-                                extraction_result["processed_content"].append({
-                                    "filename": filename,
-                                    "content": pdf_content
-                                })
-                                
-                                pdf_count += 1
-                                
-                            else:
-                                extraction_result["extraction_errors"].append(
-                                    f"PyMuPDF not available for processing {filename}"
-                                )
-                                
-                        except Exception as e:
-                            extraction_result["extraction_errors"].append(
-                                f"Error extracting {filename}: {str(e)}"
-                            )
+                    # Check if we should process this file type
+                    if file_types and file_ext not in file_types:
+                        continue
+                    
+                    try:
+                        # Get attachment data as bytes
+                        attachment_data = attachment.data
+                        
+                        # Create attachment metadata
+                        attachment_metadata = {
+                            "filename": filename,
+                            "size": getattr(attachment, 'size', len(attachment_data)),
+                            "email_subject": msg_data.get("subject", ""),
+                            "email_sender": msg_data.get("sender", ""),
+                            "email_date": msg_data.get("date", "")
+                        }
+                        
+                        # Process attachment using modular reader
+                        processed_attachment = attachment_reader.read_attachment(
+                            attachment_data, filename, attachment_metadata
+                        )
+                        
+                        extraction_result["attachments"].append({
+                            "filename": filename,
+                            "file_type": file_ext,
+                            "size": attachment_metadata["size"],
+                            "processing_method": processed_attachment["processing_method"]
+                        })
+                        
+                        extraction_result["processed_content"].append(processed_attachment)
+                        processed_count += 1
+                        
+                    except Exception as e:
+                        extraction_result["extraction_errors"].append(
+                            f"Error processing attachment {filename}: {str(e)}"
+                        )
             
             msg.close()
             
+            # Build summary
             extraction_result["summary"] = {
-                "total_pdf_attachments": pdf_count,
-                "output_directory": output_dir,
-                "processed_successfully": len(extraction_result["processed_content"])
+                "total_attachments": total_attachments,
+                "processed_attachments": processed_count,
+                "file_types_processed": list(set(att["file_type"] for att in extraction_result["attachments"])),
+                "processing_success_rate": f"{processed_count}/{total_attachments}" if total_attachments > 0 else "0/0"
             }
             
         except Exception as e:
@@ -677,6 +942,9 @@ class FileProcessor:
     def __init__(self, graph_client_id: str = None, graph_client_secret: str = None, graph_tenant_id: str = None):
         self.table_extractor = TableExtractor()
         self.outlook_parser = OutlookMsgParser()
+        
+        # Initialize AttachmentReader with this FileProcessor instance
+        self.attachment_reader = AttachmentReader(file_processor_instance=self)
         
         # Initialize Graph API processor if credentials provided
         self.graph_processor = None
@@ -1214,19 +1482,52 @@ class FileProcessor:
         
         return json.dumps(data, indent=2, ensure_ascii=False)
     
-    def extract_pdf_attachments_from_msg(self, file_path: str, output_dir: str = None, email_groups: List[str] = None) -> Dict[str, Any]:
+    def read_attachments_from_msg(self, file_path: str, email_groups: List[str] = None, 
+                                 file_types: List[str] = None, custom_processors: Dict[str, callable] = None) -> Dict[str, Any]:
         """
-        Extract and process PDF attachments from MSG files
+        Read and process attachments from MSG files using modular attachment reader
         
         Args:
             file_path: Path to MSG file
-            output_dir: Directory to save extracted PDFs
+            email_groups: Filter by specific email groups/senders
+            file_types: List of file extensions to process (e.g., ['.pdf', '.docx'])
+            custom_processors: Dict of custom processing functions {'.ext': function}
+            
+        Returns:
+            Dict containing extraction results and processed content
+        """
+        # Register custom processors if provided
+        if custom_processors:
+            for ext, processor in custom_processors.items():
+                self.attachment_reader.register_custom_processor(ext, processor)
+        
+        return self.outlook_parser.read_all_attachments(
+            file_path, email_groups, self.attachment_reader, file_types
+        )
+    
+    def register_custom_attachment_processor(self, file_extension: str, processor_function):
+        """
+        Register a custom processor for specific attachment types
+        
+        Args:
+            file_extension: File extension (e.g., '.pdf', '.docx')
+            processor_function: Function that takes (file_path, metadata) and returns ExtractedContent
+        """
+        self.attachment_reader.register_custom_processor(file_extension, processor_function)
+    
+    def extract_pdf_attachments_from_msg(self, file_path: str, output_dir: str = None, email_groups: List[str] = None) -> Dict[str, Any]:
+        """
+        Legacy method - Extract and process PDF attachments from MSG files
+        
+        Args:
+            file_path: Path to MSG file
+            output_dir: Directory to save extracted PDFs (deprecated - attachments are processed in memory)
             email_groups: Filter by specific email groups/senders
             
         Returns:
             Dict containing extraction results and processed content
         """
-        return self.outlook_parser.extract_pdf_attachments(file_path, output_dir, email_groups)
+        return self.read_attachments_from_msg(file_path, email_groups, ['.pdf'])
     
     def authenticate_graph_api(self, username: str = None, password: str = None) -> bool:
         """

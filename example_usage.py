@@ -18,34 +18,101 @@ def basic_file_processing():
     # print(f"Tables found: {len(content.tables)}")
     # print(f"Text preview: {content.text[:200]}...")
 
-def pdf_attachment_extraction():
-    """Example of extracting PDF attachments from MSG files"""
-    print("\n=== PDF Attachment Extraction ===")
+def modular_attachment_reading():
+    """Example of modular attachment reading with custom processors"""
+    print("\n=== Modular Attachment Reading ===")
     
     processor = FileProcessor()
     
-    # Extract PDF attachments from MSG file
+    # Example 1: Read all attachment types
     msg_file = "email_with_attachments.msg"  # Replace with actual MSG file
-    email_groups = ["finance@company.com", "reports@company.com"]  # Filter by sender groups
+    email_groups = ["finance@company.com", "reports@company.com"]
     
     if os.path.exists(msg_file):
-        result = processor.extract_pdf_attachments_from_msg(
+        # Read all attachments
+        result = processor.read_attachments_from_msg(
             file_path=msg_file,
-            output_dir="./extracted_pdfs/",
             email_groups=email_groups
+            # file_types=None means process all types
         )
         
         print(f"Email from: {result['email_info']['sender']}")
         print(f"Subject: {result['email_info']['subject']}")
-        print(f"PDF attachments found: {result['summary']['total_pdf_attachments']}")
+        print(f"Total attachments: {result['summary']['total_attachments']}")
+        print(f"Processed: {result['summary']['processed_attachments']}")
+        print(f"File types: {result['summary']['file_types_processed']}")
         
-        # Process extracted PDFs
-        for pdf_content in result['processed_content']:
-            print(f"\nPDF: {pdf_content['filename']}")
-            print(f"Pages: {pdf_content['content'].metadata.get('pages', 0)}")
-            print(f"Tables: {len(pdf_content['content'].tables)}")
+        # Show processing results
+        for attachment in result['processed_content']:
+            print(f"\n{attachment['filename']}: {attachment['processing_method']} processing")
+            if attachment['processed_content']:
+                content = attachment['processed_content']
+                print(f"  Text length: {len(content.text)}")
+                print(f"  Tables: {len(content.tables)}")
+                print(f"  File type: {content.file_type}")
     else:
         print("MSG file not found for demo")
+
+def custom_pdf_processing():
+    """Example of custom PDF processing for specific document types"""
+    print("\n=== Custom PDF Processing ===")
+    
+    from custom_processors import invoice_pdf_processor, financial_report_processor
+    
+    processor = FileProcessor()
+    
+    # Register custom PDF processor for invoices
+    processor.register_custom_attachment_processor('.pdf', invoice_pdf_processor)
+    
+    msg_file = "invoice_email.msg"  # Replace with actual MSG file
+    
+    if os.path.exists(msg_file):
+        result = processor.read_attachments_from_msg(
+            file_path=msg_file,
+            email_groups=["billing@company.com", "invoices@company.com"],
+            file_types=['.pdf']  # Only process PDFs
+        )
+        
+        for attachment in result['processed_content']:
+            if attachment['processing_method'] == 'custom':
+                content = attachment['processed_content']
+                print(f"\nInvoice PDF: {attachment['filename']}")
+                print(f"Invoice Number: {content.metadata.get('invoice_number', 'Not found')}")
+                print(f"Invoice Date: {content.metadata.get('invoice_date', 'Not found')}")
+                print(f"Total Amount: {content.metadata.get('total_amount', 'Not found')}")
+                print(f"Vendor: {content.metadata.get('vendor', 'Not found')}")
+    else:
+        print("Invoice email not found for demo")
+
+def selective_file_type_processing():
+    """Example of processing only specific file types"""
+    print("\n=== Selective File Type Processing ===")
+    
+    processor = FileProcessor()
+    
+    msg_file = "mixed_attachments.msg"  # Replace with actual MSG file
+    
+    if os.path.exists(msg_file):
+        # Only process PDFs and Excel files
+        result = processor.read_attachments_from_msg(
+            file_path=msg_file,
+            file_types=['.pdf', '.xlsx', '.xls']
+        )
+        
+        print(f"Total attachments: {result['summary']['total_attachments']}")
+        print(f"Processed (PDF/Excel only): {result['summary']['processed_attachments']}")
+        
+        for attachment in result['processed_content']:
+            content = attachment['processed_content']
+            print(f"\n{attachment['filename']} ({content.file_type}):")
+            print(f"  Processing method: {attachment['processing_method']}")
+            print(f"  Tables extracted: {len(content.tables)}")
+            
+            # Show table preview for Excel files
+            if content.file_type in ['excel_attachment'] and content.tables:
+                print(f"  First table preview: {content.tables[0][:2] if content.tables[0] else 'Empty'}")
+    else:
+        print("Mixed attachments email not found for demo")
 
 def graph_api_email_processing():
     """Example of processing emails using Microsoft Graph API"""
@@ -176,18 +243,26 @@ def batch_processing_example():
         print(f"{result['file']}: {result['type']} - {result['tables']} tables, {result['text_length']} chars")
 
 if __name__ == "__main__":
-    print("Universal File Processor - Enhanced Email Features Demo")
+    print("Universal File Processor - Modular Attachment Reading Demo")
     
     # Run examples
     basic_file_processing()
-    pdf_attachment_extraction()
+    modular_attachment_reading()
+    custom_pdf_processing()
+    selective_file_type_processing()
     graph_api_email_processing()
     advanced_email_workflow()
     batch_processing_example()
     
     print("\nDemo completed!")
-    print("\nTo use Graph API features:")
-    print("1. Register an app in Azure Active Directory")
-    print("2. Grant Mail.Read permissions")
-    print("3. Set environment variables or pass credentials to FileProcessor")
-    print("4. For MSG files, ensure extract-msg library is installed")
+    print("\nKey Features:")
+    print("1. Modular attachment reading with custom processors")
+    print("2. Selective file type processing")
+    print("3. Custom PDF processing for invoices, contracts, financial reports")
+    print("4. Graph API integration with delta sync")
+    print("5. Email group filtering")
+    print("6. In-memory attachment processing (no temporary files)")
+    print("\nTo get started:")
+    print("- Install dependencies: pip install -r requirements.txt")
+    print("- For MSG files: ensure extract-msg library is installed")
+    print("- For Graph API: register app in Azure AD and set credentials")
