@@ -1,0 +1,30 @@
+# Core dependencies for universal file processing
+# Minimal set optimized for resource efficiency
+
+# PDF Processing
+PyMuPDF>=1.23.0          # Primary PDF processor with table detection
+
+# Image Processing and OCR
+Pillow>=9.0.0            # Image handling
+pytesseract>=0.3.10      # OCR capabilities
+
+# Office Document Processing
+python-docx>=0.8.11      # Word document processing
+pandas>=1.5.0            # Excel and data processing
+openpyxl>=3.1.0          # Excel file support (auto-installed with pandas)
+
+# Outlook Email Processing
+extract-msg>=0.45.0      # Enhanced MSG file parsing
+
+# Optional dependencies for enhanced functionality
+# Uncomment if needed:
+
+# pdf2image>=1.16.3      # PDF to image conversion (requires poppler-utils)
+# EasyOCR>=1.7.0         # Alternative OCR with better multilingual support
+# spacy>=3.6.0           # NLP capabilities for advanced text processing
+# transformers>=4.30.0   # Transformer models for ML enhancements
+
+# Development and testing (optional)
+# pytest>=7.0.0          # Testing framework
+# black>=23.0.0          # Code formatting
+# flake8>=6.0.0          # Linting
