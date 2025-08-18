@@ -16,6 +16,10 @@ openpyxl>=3.1.0          # Excel file support (auto-installed with pandas)
 # Outlook Email Processing
 extract-msg>=0.45.0      # Enhanced MSG file parsing
 
+# Microsoft Graph API
+msal>=1.24.0             # Microsoft Authentication Library
+requests>=2.28.0         # HTTP requests for Graph API
+
 # Optional dependencies for enhanced functionality
 # Uncomment if needed:
 

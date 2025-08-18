@@ -19,6 +19,8 @@ import json
 import csv
 import io
 import struct
+import tempfile
+import requests
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
@@ -55,6 +57,12 @@ try:
 except ImportError:
     HAS_EXTRACT_MSG = False
 
+try:
+    from msal import ConfidentialClientApplication, PublicClientApplication
+    HAS_MSAL = True
+except ImportError:
+    HAS_MSAL = False
+
 
 @dataclass
 class ExtractedContent:
@@ -71,6 +79,220 @@ class ExtractedContent:
     tables: List[List[List[str]]]
     metadata: Dict[str, Any]
     file_type: str
+
+
+class GraphApiEmailProcessor:
+    """
+    Microsoft Graph API email processor with delta query support
+    
+    ML Enhancement Opportunities:
+    - Real-time email classification using streaming models
+    - Anomaly detection for unusual email patterns
+    - Automated email routing using NLP
+    - Sentiment analysis for customer service emails
+    """
+    
+    def __init__(self, client_id: str, client_secret: str = None, tenant_id: str = None):
+        """
+        Initialize Graph API processor
+        
+        Args:
+            client_id: Azure app registration client ID
+            client_secret: Client secret (for daemon apps)
+            tenant_id: Azure tenant ID
+        """
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.tenant_id = tenant_id or "common"
+        self.access_token = None
+        self.delta_token = None
+        
+        if not HAS_MSAL:
+            raise ImportError("Microsoft Authentication Library (msal) not available. Install with: pip install msal")
+    
+    def authenticate(self, username: str = None, password: str = None) -> bool:
+        """
+        Authenticate with Microsoft Graph API
+        
+        Args:
+            username: User email (for user authentication)
+            password: User password (for user authentication)
+            
+        Returns:
+            bool: Authentication success status
+        """
+        try:
+            if self.client_secret:
+                # Daemon app authentication
+                app = ConfidentialClientApplication(
+                    client_id=self.client_id,
+                    client_credential=self.client_secret,
+                    authority=f"https://login.microsoftonline.com/{self.tenant_id}"
+                )
+                result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+            else:
+                # Public client authentication
+                app = PublicClientApplication(
+                    client_id=self.client_id,
+                    authority=f"https://login.microsoftonline.com/{self.tenant_id}"
+                )
+                
+                if username and password:
+                    result = app.acquire_token_by_username_password(
+                        username=username,
+                        password=password,
+                        scopes=["https://graph.microsoft.com/Mail.Read"]
+                    )
+                else:
+                    # Interactive authentication
+                    result = app.acquire_token_interactive(
+                        scopes=["https://graph.microsoft.com/Mail.Read"]
+                    )
+            
+            if "access_token" in result:
+                self.access_token = result["access_token"]
+                return True
+            else:
+                print(f"Authentication failed: {result.get('error_description', 'Unknown error')}")
+                return False
+                
+        except Exception as e:
+            print(f"Authentication error: {str(e)}")
+            return False
+    
+    def get_delta_messages(self, email_groups: List[str] = None, folder_id: str = None) -> List[Dict[str, Any]]:
+        """
+        Get email messages using delta query for incremental sync
+        
+        Args:
+            email_groups: List of email addresses/groups to filter
+            folder_id: Specific folder ID (default: inbox)
+            
+        Returns:
+            List of email message data
+            
+        ML Enhancement Opportunities:
+        - Implement smart filtering using ML models
+        - Add priority classification for email triage
+        - Use clustering for email categorization
+        """
+        if not self.access_token:
+            raise ValueError("Not authenticated. Call authenticate() first.")
+        
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Build query URL
+        base_url = "https://graph.microsoft.com/v1.0/me/messages"
+        if folder_id:
+            base_url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}/messages"
+        
+        # Add delta query
+        if self.delta_token:
+            url = f"{base_url}/delta?$deltatoken={self.delta_token}"
+        else:
+            url = f"{base_url}/delta"
+        
+        # Add filters
+        filters = []
+        if email_groups:
+            group_filters = []
+            for group in email_groups:
+                group_filters.append(f"from/emailAddress/address eq '{group}'")
+                group_filters.append(f"toRecipients/any(t: t/emailAddress/address eq '{group}')")
+            filters.append(f"({' or '.join(group_filters)})")
+        
+        if filters:
+            url += f"&$filter={' and '.join(filters)}"
+        
+        messages = []
+        
+        try:
+            while url:
+                response = requests.get(url, headers=headers)
+                response.raise_for_status()
+                
+                data = response.json()
+                messages.extend(data.get("value", []))
+                
+                # Check for next page or delta token
+                next_link = data.get("@odata.nextLink")
+                delta_link = data.get("@odata.deltaLink")
+                
+                if delta_link:
+                    # Extract delta token for next sync
+                    self.delta_token = delta_link.split("$deltatoken=")[1]
+                    break
+                elif next_link:
+                    url = next_link
+                else:
+                    break
+                    
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching messages: {str(e)}")
+            return []
+        
+        return messages
+    
+    def process_graph_message(self, message_data: Dict[str, Any]) -> ExtractedContent:
+        """
+        Process a Graph API message into ExtractedContent format
+        
+        Args:
+            message_data: Raw message data from Graph API
+            
+        Returns:
+            ExtractedContent object
+        """
+        # Extract basic message info
+        subject = message_data.get("subject", "")
+        sender = message_data.get("from", {}).get("emailAddress", {}).get("address", "")
+        recipients = []
+        
+        # Extract all recipients
+        for to_recipient in message_data.get("toRecipients", []):
+            recipients.append(to_recipient.get("emailAddress", {}).get("address", ""))
+        for cc_recipient in message_data.get("ccRecipients", []):
+            recipients.append(cc_recipient.get("emailAddress", {}).get("address", ""))
+        
+        body = message_data.get("body", {}).get("content", "")
+        received_time = message_data.get("receivedDateTime", "")
+        
+        # Build text content
+        text = f"Subject: {subject}\n"
+        text += f"From: {sender}\n"
+        text += f"To: {'; '.join(recipients)}\n"
+        text += f"Date: {received_time}\n"
+        text += f"Message ID: {message_data.get('id', '')}\n"
+        text += "\n" + "-" * 50 + "\n\n"
+        text += body
+        
+        # Extract tables from body
+        table_extractor = TableExtractor()
+        tables = table_extractor.detect_table_patterns(body)
+        
+        # Build metadata
+        metadata = {
+            "message_id": message_data.get("id", ""),
+            "subject": subject,
+            "sender": sender,
+            "recipient_count": len(recipients),
+            "received_date": received_time,
+            "has_attachments": message_data.get("hasAttachments", False),
+            "importance": message_data.get("importance", "normal"),
+            "is_read": message_data.get("isRead", False),
+            "conversation_id": message_data.get("conversationId", ""),
+            "source": "graph_api"
+        }
+        
+        return ExtractedContent(
+            text=text,
+            tables=tables,
+            metadata=metadata,
+            file_type="email_graph"
+        )
 
 
 class OutlookMsgParser:
@@ -216,6 +438,119 @@ class OutlookMsgParser:
             msg_data["body"] = f"Error parsing MSG file: {str(e)}"
         
         return msg_data
+    
+    @staticmethod
+    def extract_pdf_attachments(file_path: str, output_dir: str = None, email_groups: List[str] = None) -> Dict[str, Any]:
+        """
+        Extract PDF attachments from MSG file and process them
+        
+        Args:
+            file_path: Path to MSG file
+            output_dir: Directory to save extracted PDFs (optional)
+            email_groups: Filter by specific email groups/senders
+            
+        Returns:
+            Dict containing attachment info and processed content
+            
+        ML Enhancement Opportunities:
+        - Classify attachment importance using content analysis
+        - Detect document types using machine learning
+        - Extract structured data using specialized models
+        """
+        extraction_result = {
+            "pdf_attachments": [],
+            "processed_content": [],
+            "extraction_errors": [],
+            "email_info": {}
+        }
+        
+        try:
+            # First parse the email to check sender/groups
+            msg_data = OutlookMsgParser.parse_msg_file(file_path)
+            extraction_result["email_info"] = {
+                "subject": msg_data.get("subject", ""),
+                "sender": msg_data.get("sender", ""),
+                "date": msg_data.get("date", "")
+            }
+            
+            # Check if email is from specified groups
+            if email_groups:
+                sender = msg_data.get("sender", "").lower()
+                group_match = any(group.lower() in sender for group in email_groups)
+                if not group_match:
+                    extraction_result["extraction_errors"].append(
+                        f"Email sender '{sender}' not in specified groups: {email_groups}"
+                    )
+                    return extraction_result
+            
+            if not HAS_EXTRACT_MSG:
+                extraction_result["extraction_errors"].append(
+                    "extract-msg library not available. Install with: pip install extract-msg"
+                )
+                return extraction_result
+            
+            # Process MSG file for attachments
+            msg = extract_msg.Message(file_path)
+            
+            # Create temp directory if no output specified
+            if output_dir is None:
+                output_dir = tempfile.mkdtemp(prefix="msg_pdf_extract_")
+            else:
+                os.makedirs(output_dir, exist_ok=True)
+            
+            pdf_count = 0
+            for attachment in msg.attachments:
+                if hasattr(attachment, 'longFilename') and attachment.longFilename:
+                    filename = attachment.longFilename
+                    
+                    # Check if it's a PDF
+                    if filename.lower().endswith('.pdf'):
+                        try:
+                            # Extract the PDF
+                            pdf_path = os.path.join(output_dir, filename)
+                            attachment.save(output_dir)
+                            
+                            # Process the extracted PDF
+                            if HAS_PYMUPDF:
+                                from file_processor import FileProcessor  # Avoid circular import
+                                processor = FileProcessor()
+                                pdf_content = processor._process_pdf(pdf_path)
+                                
+                                extraction_result["pdf_attachments"].append({
+                                    "filename": filename,
+                                    "file_path": pdf_path,
+                                    "size": getattr(attachment, 'size', 0)
+                                })
+                                
+                                extraction_result["processed_content"].append({
+                                    "filename": filename,
+                                    "content": pdf_content
+                                })
+                                
+                                pdf_count += 1
+                                
+                            else:
+                                extraction_result["extraction_errors"].append(
+                                    f"PyMuPDF not available for processing {filename}"
+                                )
+                                
+                        except Exception as e:
+                            extraction_result["extraction_errors"].append(
+                                f"Error extracting {filename}: {str(e)}"
+                            )
+            
+            msg.close()
+            
+            extraction_result["summary"] = {
+                "total_pdf_attachments": pdf_count,
+                "output_directory": output_dir,
+                "processed_successfully": len(extraction_result["processed_content"])
+            }
+            
+        except Exception as e:
+            extraction_result["extraction_errors"].append(f"General extraction error: {str(e)}")
+        
+        return extraction_result
 
 
 class TableExtractor:
@@ -339,9 +674,21 @@ class FileProcessor:
     - Implement federated learning for privacy-preserving model updates
     """
     
-    def __init__(self):
+    def __init__(self, graph_client_id: str = None, graph_client_secret: str = None, graph_tenant_id: str = None):
         self.table_extractor = TableExtractor()
         self.outlook_parser = OutlookMsgParser()
+        
+        # Initialize Graph API processor if credentials provided
+        self.graph_processor = None
+        if graph_client_id:
+            try:
+                self.graph_processor = GraphApiEmailProcessor(
+                    client_id=graph_client_id,
+                    client_secret=graph_client_secret,
+                    tenant_id=graph_tenant_id
+                )
+            except ImportError:
+                print("Graph API functionality not available. Install msal: pip install msal")
     
     def process_file(self, file_path: str) -> ExtractedContent:
         """
@@ -866,6 +1213,79 @@ class FileProcessor:
         }
         
         return json.dumps(data, indent=2, ensure_ascii=False)
+    
+    def extract_pdf_attachments_from_msg(self, file_path: str, output_dir: str = None, email_groups: List[str] = None) -> Dict[str, Any]:
+        """
+        Extract and process PDF attachments from MSG files
+        
+        Args:
+            file_path: Path to MSG file
+            output_dir: Directory to save extracted PDFs
+            email_groups: Filter by specific email groups/senders
+            
+        Returns:
+            Dict containing extraction results and processed content
+        """
+        return self.outlook_parser.extract_pdf_attachments(file_path, output_dir, email_groups)
+    
+    def authenticate_graph_api(self, username: str = None, password: str = None) -> bool:
+        """
+        Authenticate with Microsoft Graph API
+        
+        Args:
+            username: User email (optional)
+            password: User password (optional)
+            
+        Returns:
+            bool: Authentication success status
+        """
+        if not self.graph_processor:
+            raise ValueError("Graph API processor not initialized. Provide client credentials in constructor.")
+        
+        return self.graph_processor.authenticate(username, password)
+    
+    def process_emails_from_graph(self, email_groups: List[str] = None, folder_id: str = None) -> List[ExtractedContent]:
+        """
+        Process emails from Microsoft Graph API with delta sync
+        
+        Args:
+            email_groups: Filter by specific email groups/addresses
+            folder_id: Specific folder ID (default: inbox)
+            
+        Returns:
+            List of ExtractedContent objects for each email
+        """
+        if not self.graph_processor:
+            raise ValueError("Graph API processor not initialized. Provide client credentials in constructor.")
+        
+        if not self.graph_processor.access_token:
+            raise ValueError("Not authenticated with Graph API. Call authenticate_graph_api() first.")
+        
+        # Get messages using delta query
+        messages = self.graph_processor.get_delta_messages(email_groups, folder_id)
+        
+        # Process each message
+        processed_emails = []
+        for message in messages:
+            try:
+                content = self.graph_processor.process_graph_message(message)
+                processed_emails.append(content)
+            except Exception as e:
+                print(f"Error processing message {message.get('id', 'unknown')}: {str(e)}")
+        
+        return processed_emails
+    
+    def get_graph_delta_token(self) -> str:
+        """
+        Get the current delta token for incremental sync
+        
+        Returns:
+            Current delta token string
+        """
+        if not self.graph_processor:
+            raise ValueError("Graph API processor not initialized.")
+        
+        return self.graph_processor.delta_token
 
 
 def main():
