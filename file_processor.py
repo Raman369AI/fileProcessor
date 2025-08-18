@@ -361,7 +361,7 @@ class GraphApiEmailProcessor:
         self.client_secret = client_secret
         self.tenant_id = tenant_id or "common"
         self.access_token = None
-        self.delta_token = None
+        self.delta_link = None
         
         if not HAS_MSAL:
             raise ImportError("Microsoft Authentication Library (msal) not available. Install with: pip install msal")
@@ -416,16 +416,18 @@ class GraphApiEmailProcessor:
             print(f"Authentication error: {str(e)}")
             return False
     
-    def get_delta_messages(self, email_groups: List[str] = None, folder_id: str = None) -> List[Dict[str, Any]]:
+    def get_delta_messages(self, folder_id: str = None) -> List[Dict[str, Any]]:
         """
         Get email messages using delta query for incremental sync
         
         Args:
-            email_groups: List of email addresses/groups to filter
             folder_id: Specific folder ID (default: inbox)
             
         Returns:
             List of email message data
+            
+        Note: Delta queries cannot be combined with $filter. Use filter_messages_by_groups() 
+        to filter results after retrieval.
             
         ML Enhancement Opportunities:
         - Implement smart filtering using ML models
@@ -440,46 +442,46 @@ class GraphApiEmailProcessor:
             "Content-Type": "application/json"
         }
         
-        # Build query URL
-        base_url = "https://graph.microsoft.com/v1.0/me/messages"
-        if folder_id:
-            base_url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}/messages"
-        
-        # Add delta query
-        if self.delta_token:
-            url = f"{base_url}/delta?$deltatoken={self.delta_token}"
+        # Use stored delta link or build initial URL
+        if self.delta_link:
+            # Use the complete delta link URL from previous sync
+            url = self.delta_link
         else:
+            # First time - build initial delta URL
+            base_url = "https://graph.microsoft.com/v1.0/me/messages"
+            if folder_id:
+                base_url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}/messages"
             url = f"{base_url}/delta"
-        
-        # Add filters
-        filters = []
-        if email_groups:
-            group_filters = []
-            for group in email_groups:
-                group_filters.append(f"from/emailAddress/address eq '{group}'")
-                group_filters.append(f"toRecipients/any(t: t/emailAddress/address eq '{group}')")
-            filters.append(f"({' or '.join(group_filters)})")
-        
-        if filters:
-            url += f"&$filter={' and '.join(filters)}"
         
         messages = []
         
         try:
             while url:
                 response = requests.get(url, headers=headers)
+                
+                # Handle token expiry
+                if response.status_code == 401:
+                    raise ValueError("Access token expired. Re-authenticate required.")
+                
                 response.raise_for_status()
                 
                 data = response.json()
-                messages.extend(data.get("value", []))
                 
-                # Check for next page or delta token
+                # Filter out deleted items (they have @removed annotation)
+                current_messages = []
+                for item in data.get("value", []):
+                    if "@removed" not in item:
+                        current_messages.append(item)
+                
+                messages.extend(current_messages)
+                
+                # Check for next page or delta link
                 next_link = data.get("@odata.nextLink")
                 delta_link = data.get("@odata.deltaLink")
                 
                 if delta_link:
-                    # Extract delta token for next sync
-                    self.delta_token = delta_link.split("$deltatoken=")[1]
+                    # Store the complete delta link URL for next sync
+                    self.delta_link = delta_link
                     break
                 elif next_link:
                     url = next_link
@@ -491,6 +493,47 @@ class GraphApiEmailProcessor:
             return []
         
         return messages
+    
+    def filter_messages_by_groups(self, messages: List[Dict[str, Any]], email_groups: List[str]) -> List[Dict[str, Any]]:
+        """
+        Filter messages by email groups after retrieval
+        
+        Args:
+            messages: List of message data from Graph API
+            email_groups: List of email addresses/groups to filter by
+            
+        Returns:
+            Filtered list of messages
+        """
+        if not email_groups:
+            return messages
+        
+        filtered_messages = []
+        
+        for message in messages:
+            # Check sender
+            sender = message.get("from", {}).get("emailAddress", {}).get("address", "").lower()
+            
+            # Check recipients
+            recipients = []
+            for to_recipient in message.get("toRecipients", []):
+                recipients.append(to_recipient.get("emailAddress", {}).get("address", "").lower())
+            for cc_recipient in message.get("ccRecipients", []):
+                recipients.append(cc_recipient.get("emailAddress", {}).get("address", "").lower())
+            
+            # Check if sender or any recipient matches email groups
+            group_match = False
+            for group in email_groups:
+                group_lower = group.lower()
+                if (group_lower in sender or 
+                    any(group_lower in recipient for recipient in recipients)):
+                    group_match = True
+                    break
+            
+            if group_match:
+                filtered_messages.append(message)
+        
+        return filtered_messages
     
     def process_graph_message(self, message_data: Dict[str, Any]) -> ExtractedContent:
         """
@@ -549,6 +592,74 @@ class GraphApiEmailProcessor:
             metadata=metadata,
             file_type="email_graph"
         )
+    
+    def get_message_attachments(self, message_id: str) -> List[Dict[str, Any]]:
+        """
+        Get attachments for a specific message from Graph API
+        
+        Args:
+            message_id: The message ID from Graph API
+            
+        Returns:
+            List of attachment data
+        """
+        if not self.access_token:
+            raise ValueError("Not authenticated. Call authenticate() first.")
+        
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/attachments"
+        
+        try:
+            response = requests.get(url, headers=headers)
+            
+            if response.status_code == 401:
+                raise ValueError("Access token expired. Re-authenticate required.")
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            return data.get("value", [])
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching attachments: {str(e)}")
+            return []
+    
+    def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        """
+        Download attachment content from Graph API
+        
+        Args:
+            message_id: The message ID
+            attachment_id: The attachment ID
+            
+        Returns:
+            Attachment content as bytes
+        """
+        if not self.access_token:
+            raise ValueError("Not authenticated. Call authenticate() first.")
+        
+        headers = {
+            "Authorization": f"Bearer {self.access_token}"
+        }
+        
+        url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/attachments/{attachment_id}/$value"
+        
+        try:
+            response = requests.get(url, headers=headers)
+            
+            if response.status_code == 401:
+                raise ValueError("Access token expired. Re-authenticate required.")
+            
+            response.raise_for_status()
+            return response.content
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error downloading attachment: {str(e)}")
+            return b""
 
 
 class OutlookMsgParser:
@@ -1562,8 +1673,12 @@ class FileProcessor:
         if not self.graph_processor.access_token:
             raise ValueError("Not authenticated with Graph API. Call authenticate_graph_api() first.")
         
-        # Get messages using delta query
-        messages = self.graph_processor.get_delta_messages(email_groups, folder_id)
+        # Get messages using delta query (no filtering at API level)
+        messages = self.graph_processor.get_delta_messages(folder_id)
+        
+        # Filter messages by email groups if specified
+        if email_groups:
+            messages = self.graph_processor.filter_messages_by_groups(messages, email_groups)
         
         # Process each message
         processed_emails = []
@@ -1576,17 +1691,26 @@ class FileProcessor:
         
         return processed_emails
     
-    def get_graph_delta_token(self) -> str:
+    def get_graph_delta_link(self) -> str:
         """
-        Get the current delta token for incremental sync
+        Get the current delta link for incremental sync
         
         Returns:
-            Current delta token string
+            Current delta link URL (contains embedded token)
         """
         if not self.graph_processor:
             raise ValueError("Graph API processor not initialized.")
         
-        return self.graph_processor.delta_token
+        return self.graph_processor.delta_link
+    
+    def reset_graph_delta_sync(self):
+        """
+        Reset delta sync to start from beginning
+        """
+        if not self.graph_processor:
+            raise ValueError("Graph API processor not initialized.")
+        
+        self.graph_processor.delta_link = None
 
 
 def main():

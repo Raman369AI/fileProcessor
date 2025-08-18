@@ -142,9 +142,12 @@ def graph_api_email_processing():
                 print(f"Has attachments: {email.metadata['has_attachments']}")
                 print(f"Tables found: {len(email.tables)}")
                 
-            # Get delta token for next sync
-            delta_token = processor.get_graph_delta_token()
-            print(f"Delta token for next sync: {delta_token[:50]}...")
+            # Get delta link for next sync
+            delta_link = processor.get_graph_delta_link()
+            if delta_link:
+                print(f"Delta link for next sync: {delta_link[:80]}...")
+            else:
+                print("No delta link available yet")
             
         else:
             print("Authentication failed")
