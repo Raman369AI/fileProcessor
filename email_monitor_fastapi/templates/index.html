@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Monitor Dashboard</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/css/dashboard.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="#">
+                <i class="fas fa-envelope-open-text me-2"></i>
+                Email Monitor Dashboard
+            </a>
+            <button class="btn btn-outline-light" onclick="triggerProcessing()">
+                <i class="fas fa-play me-1"></i>
+                Process Now
+            </button>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <!-- Status Cards -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card bg-success text-white">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <h6 class="card-title">Status</h6>
+                                <h4 id="service-status">Loading...</h4>
+                            </div>
+                            <div class="align-self-center">
+                                <i class="fas fa-server fa-2x"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-info text-white">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <h6 class="card-title">Total Runs</h6>
+                                <h4 id="total-runs">0</h4>
+                            </div>
+                            <div class="align-self-center">
+                                <i class="fas fa-sync fa-2x"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-warning text-white">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <h6 class="card-title">Messages</h6>
+                                <h4 id="messages-processed">0</h4>
+                            </div>
+                            <div class="align-self-center">
+                                <i class="fas fa-envelope fa-2x"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-secondary text-white">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <h6 class="card-title">Attachments</h6>
+                                <h4 id="attachments-processed">0</h4>
+                            </div>
+                            <div class="align-self-center">
+                                <i class="fas fa-paperclip fa-2x"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Configuration and Last Run Info -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-cog me-2"></i>Configuration</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-4"><strong>Email Groups:</strong></div>
+                            <div class="col-sm-8" id="email-groups">Loading...</div>
+                        </div>
+                        <hr>
+                        <div class="row">
+                            <div class="col-sm-4"><strong>File Types:</strong></div>
+                            <div class="col-sm-8" id="file-types">Loading...</div>
+                        </div>
+                        <hr>
+                        <div class="row">
+                            <div class="col-sm-4"><strong>Storage Dir:</strong></div>
+                            <div class="col-sm-8" id="attachments-dir">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-clock me-2"></i>Last Run Information</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-4"><strong>Last Run:</strong></div>
+                            <div class="col-sm-8" id="last-run">Never</div>
+                        </div>
+                        <hr>
+                        <div class="row">
+                            <div class="col-sm-4"><strong>Errors:</strong></div>
+                            <div class="col-sm-8"><span id="error-count" class="badge bg-danger">0</span></div>
+                        </div>
+                        <hr>
+                        <div class="row">
+                            <div class="col-sm-4"><strong>Idempotency:</strong></div>
+                            <div class="col-sm-8">
+                                <span id="delta-status" class="badge bg-success">Active</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Results -->
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5><i class="fas fa-list me-2"></i>Recent Processing Results</h5>
+                <button class="btn btn-sm btn-outline-primary" onclick="refreshResults()">
+                    <i class="fas fa-refresh me-1"></i>Refresh
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="results-container">
+                    <div class="text-center">
+                        <div class="spinner-border" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Processing Details Modal -->
+        <div class="modal fade" id="detailsModal" tabindex="-1">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Processing Details</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="modal-content">
+                            <!-- Dynamic content loaded here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- JSON Viewer Modal -->
+        <div class="modal fade" id="jsonModal" tabindex="-1">
+            <div class="modal-dialog modal-xl">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">JSON Processing Results</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <pre id="json-content" class="bg-light p-3 rounded" style="max-height: 70vh; overflow-y: auto;"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

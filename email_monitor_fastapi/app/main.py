@@ -1,8 +1,8 @@
 """
-Email Monitoring Service with FastAPI
+Email Monitoring Service with FastAPI and HTML Interface
 
-Perfect for Windows VM - runs as background service with web monitoring.
-Handles email idempotency via Graph API delta queries.
+Enhanced version with web dashboard for monitoring email processing.
+Perfect for Windows VM environments.
 """
 
 import os
@@ -14,7 +14,10 @@ from typing import Dict, List, Any
 import requests
 import asyncio
 
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import uvicorn
@@ -25,6 +28,9 @@ try:
 except ImportError:
     HAS_MSAL = False
 
+# Import from parent directory
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from file_processor import AttachmentReader
 
 
@@ -53,7 +59,7 @@ class GraphEmailClient:
         self.access_token = None
         self.delta_link = None
         
-        # Store delta link persistently to avoid reprocessing emails on restart
+        # Store delta link persistently
         self.delta_file = Path("delta_link.txt")
         self._load_delta_link()
     
@@ -96,14 +102,7 @@ class GraphEmailClient:
             return False
     
     def get_new_messages(self, email_groups: List[str] = None) -> List[Dict[str, Any]]:
-        """
-        Get NEW messages only using delta query (ensures idempotency)
-        
-        How idempotency works:
-        1. First run: Gets all emails, returns delta link
-        2. Subsequent runs: Only gets emails added/changed since last delta link
-        3. No duplicates ever processed!
-        """
+        """Get NEW messages only using delta query (ensures idempotency)"""
         if not self.access_token:
             return []
         
@@ -125,7 +124,7 @@ class GraphEmailClient:
                 response.raise_for_status()
                 data = response.json()
                 
-                # Filter out deleted items (marked with @removed)
+                # Filter out deleted items
                 messages = [msg for msg in data.get("value", []) if "@removed" not in msg]
                 
                 # Filter by email groups if specified
@@ -144,7 +143,6 @@ class GraphEmailClient:
                 delta_link = data.get("@odata.deltaLink")
                 
                 if delta_link:
-                    # Save delta link for next run (idempotency!)
                     self.delta_link = delta_link
                     self._save_delta_link()
                     break
@@ -239,10 +237,7 @@ class EmailMonitor:
         return True
     
     async def process_emails(self):
-        """
-        Main processing function - runs every 5 minutes
-        Idempotency guaranteed by Graph API delta queries
-        """
+        """Main processing function - runs every 5 minutes"""
         if not self.graph_client:
             logger.error("Graph client not initialized")
             return
@@ -277,10 +272,7 @@ class EmailMonitor:
             self.stats['errors'] += 1
     
     async def _process_message(self, message: Dict[str, Any]):
-        """
-        Process single message and attachments
-        Attachment idempotency: Same message = same directory = overwrites duplicates
-        """
+        """Process single message and attachments"""
         message_id = message.get("id", "")
         subject = message.get("subject", "No Subject")
         
@@ -296,11 +288,12 @@ class EmailMonitor:
             
             logger.info(f"Processing {len(attachments)} attachments for: {subject[:50]}")
             
-            # Create message directory (same message = same directory = idempotent)
+            # Create message directory
             safe_subject = "".join(c for c in subject if c.isalnum() or c in (' ', '-', '_')).rstrip()[:50]
             message_dir = self.attachments_dir / f"{message_id[:8]}_{safe_subject}"
             message_dir.mkdir(exist_ok=True)
             
+            processed_attachments = []
             processed_count = 0
             
             for attachment in attachments:
@@ -320,7 +313,7 @@ class EmailMonitor:
                 if not attachment_data:
                     continue
                 
-                # Save attachment (overwrites if exists = idempotent)
+                # Save attachment
                 attachment_path = message_dir / attachment_name
                 attachment_path.write_bytes(attachment_data)
                 
@@ -344,6 +337,15 @@ class EmailMonitor:
                             "file_type": content.file_type
                         }, f, indent=2, ensure_ascii=False)
                 
+                processed_attachments.append({
+                    "filename": attachment_name,
+                    "file_type": os.path.splitext(attachment_name)[1].lower(),
+                    "file_size": len(attachment_data),
+                    "saved_path": str(attachment_path),
+                    "processing_method": processed.get("processing_method", "none"),
+                    "errors": processed.get("errors", [])
+                })
+                
                 processed_count += 1
                 self.stats['attachments_processed'] += 1
             
@@ -356,7 +358,8 @@ class EmailMonitor:
                         "sender": message.get("from", {}).get("emailAddress", {}).get("address", ""),
                         "processed_date": datetime.now().isoformat(),
                         "attachments_processed": processed_count
-                    }
+                    },
+                    "attachments": processed_attachments
                 }
                 
                 summary_file = message_dir / "processing_summary.json"
@@ -372,10 +375,14 @@ monitor = EmailMonitor()
 
 # Create FastAPI app
 app = FastAPI(
-    title="Email Monitor", 
-    description="24/7 Email Monitoring for Windows VM",
+    title="Email Monitor Dashboard", 
+    description="24/7 Email Monitoring with Web Interface",
     version="1.0.0"
 )
+
+# Mount static files and templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 # Background scheduler
 scheduler = BackgroundScheduler()
@@ -402,20 +409,15 @@ async def shutdown():
     logger.info("Email monitoring stopped")
 
 
-@app.get("/")
-async def root():
-    """Service status"""
-    return {
-        "service": "Email Monitor",
-        "status": "running",
-        "monitoring_interval": "5 minutes",
-        "idempotency": "Graph API delta queries ensure no duplicates"
-    }
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    """Main dashboard page"""
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.get("/status")
 async def get_status():
-    """Detailed status"""
+    """Detailed status API"""
     return {
         "status": "running",
         "stats": monitor.stats,
@@ -461,31 +463,124 @@ async def get_recent_results():
         return {"error": str(e), "recent_results": []}
 
 
+@app.get("/email-details/{message_id}")
+async def get_email_details(message_id: str):
+    """Get detailed information about a processed email"""
+    try:
+        # Find the message directory
+        message_dir = None
+        for dir_path in monitor.attachments_dir.iterdir():
+            if dir_path.is_dir() and dir_path.name.startswith(message_id[:8]):
+                message_dir = dir_path
+                break
+        
+        if not message_dir:
+            raise HTTPException(status_code=404, detail="Email not found")
+        
+        summary_file = message_dir / "processing_summary.json"
+        if not summary_file.exists():
+            raise HTTPException(status_code=404, detail="Processing summary not found")
+        
+        with open(summary_file) as f:
+            summary = json.load(f)
+        
+        return summary
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/email-json/{message_id}")
+async def get_email_json(message_id: str):
+    """Get complete JSON data for an email"""
+    try:
+        # Find the message directory
+        message_dir = None
+        for dir_path in monitor.attachments_dir.iterdir():
+            if dir_path.is_dir() and dir_path.name.startswith(message_id[:8]):
+                message_dir = dir_path
+                break
+        
+        if not message_dir:
+            raise HTTPException(status_code=404, detail="Email not found")
+        
+        # Collect all JSON files
+        result = {"email_summary": None, "attachments": []}
+        
+        # Get summary
+        summary_file = message_dir / "processing_summary.json"
+        if summary_file.exists():
+            with open(summary_file) as f:
+                result["email_summary"] = json.load(f)
+        
+        # Get all processed attachments
+        for file_path in message_dir.glob("*.processed.json"):
+            with open(file_path) as f:
+                attachment_data = json.load(f)
+                result["attachments"].append({
+                    "filename": file_path.name.replace(".processed.json", ""),
+                    "processed_content": attachment_data
+                })
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/attachment-json/{message_id}/{filename}")
+async def get_attachment_json(message_id: str, filename: str):
+    """Get JSON processing results for a specific attachment"""
+    try:
+        # Find the message directory
+        message_dir = None
+        for dir_path in monitor.attachments_dir.iterdir():
+            if dir_path.is_dir() and dir_path.name.startswith(message_id[:8]):
+                message_dir = dir_path
+                break
+        
+        if not message_dir:
+            raise HTTPException(status_code=404, detail="Email not found")
+        
+        # Find the processed JSON file
+        json_file = message_dir / f"{filename}.processed.json"
+        if not json_file.exists():
+            raise HTTPException(status_code=404, detail="Processed file not found")
+        
+        with open(json_file) as f:
+            return json.load(f)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def main():
-    """Run the service"""
-    print("🚀 Email Monitoring Service for Windows VM")
+    """Run the FastAPI server with web interface"""
+    print("🚀 Email Monitor Dashboard")
     print("=" * 50)
     print("Features:")
-    print("• Runs every 5 minutes automatically")
-    print("• Email idempotency via Graph API delta queries") 
-    print("• Attachment idempotency via directory-based storage")
-    print("• Web interface at http://localhost:8000")
-    print("• Persistent across restarts")
+    print("• Web dashboard at http://localhost:8000")
+    print("• Real-time monitoring and stats")
+    print("• JSON processing results viewer")
+    print("• Email and attachment details")
+    print("• Manual processing trigger")
     print()
-    print("Required environment variables:")
+    print("Environment variables required:")
     print("• AZURE_CLIENT_ID")
     print("• AZURE_CLIENT_SECRET")
     print("• AZURE_TENANT_ID")
     print("• EMAIL_GROUPS (comma-separated)")
-    print()
-    print("Optional:")
-    print("• ATTACHMENTS_DIR (default: email_attachments)")
-    print("• FILE_TYPES (default: .pdf,.docx,.xlsx)")
     print("=" * 50)
     
     # Run FastAPI server
     uvicorn.run(
-        "email_monitor_fastapi:app",
+        "app.main:app",
         host="0.0.0.0",
         port=8000,
         reload=False,

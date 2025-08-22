@@ -1,0 +1,1 @@
+# Email Monitor FastAPI Application
