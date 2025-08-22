@@ -184,20 +184,70 @@ python email_monitor_example.py
 
 ## 📧 24/7 Email Monitoring Service
 
-A separate Prefect-based service for continuous email monitoring and attachment processing.
+Two options for continuous email monitoring and attachment processing:
+
+### Option 1: FastAPI Service (Recommended for Windows)
+Perfect for Windows VMs - lightweight service with web monitoring interface.
+
+### Option 2: Prefect Orchestration (Advanced workflows)
+More robust orchestration platform with enterprise features.
+
+## FastAPI Service (Windows Recommended)
 
 ### Features
-- **24/7 Operation**: Continuous monitoring using Prefect orchestration
-- **Single Instance**: Concurrency control ensures only one task runs at a time
-- **Delta Sync**: Incremental email processing using Microsoft Graph API
-- **Multi-Attachment Support**: Handles multiple attachments per email
-- **Automatic Retry**: Built-in error handling and retry mechanisms
-- **Rich Monitoring**: Prefect UI for flow monitoring and debugging
+- **Windows VM Optimized**: No cron dependencies, runs as background service
+- **Email Idempotency**: Graph API delta queries prevent duplicate processing
+- **Attachment Idempotency**: Directory-based storage prevents duplicate files
+- **5-Minute Intervals**: APScheduler handles timing automatically
+- **Web Monitoring**: Built-in web interface at http://localhost:8000
+- **Persistent**: Delta state survives service restarts
 
 ### Installation
 
 ```bash
-# Install additional dependencies for email monitoring
+# Install FastAPI dependencies
+pip install -r requirements_fastapi.txt
+```
+
+### Quick Start
+
+```bash
+# Set environment variables
+set AZURE_CLIENT_ID=your-client-id
+set AZURE_CLIENT_SECRET=your-client-secret
+set AZURE_TENANT_ID=your-tenant-id
+set EMAIL_GROUPS=support@company.com,billing@company.com
+
+# Start service
+python email_monitor_fastapi.py
+
+# Monitor at http://localhost:8000
+```
+
+### Idempotency Guarantees
+
+**Email Processing**: Uses Microsoft Graph API delta queries
+- First run: Processes all emails, stores delta link
+- Subsequent runs: Only processes NEW emails since last delta link
+- Result: Zero duplicate email processing
+
+**Attachment Storage**: Directory-based deduplication  
+- Each email gets unique directory: `{message_id}_{subject}`
+- Same email = same directory = files overwritten (idempotent)
+- Different emails = different directories = no conflicts
+
+## Prefect Service (Enterprise Features)
+
+### Features
+- **Advanced Orchestration**: Complex workflow management
+- **Built-in Retries**: Automatic error handling and recovery
+- **Rich UI**: Comprehensive monitoring and debugging
+- **Concurrency Control**: Ensures single instance execution
+
+### Installation
+
+```bash
+# Install Prefect dependencies
 pip install -r requirements_prefect.txt
 ```
 
