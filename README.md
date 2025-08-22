@@ -216,21 +216,27 @@ prefect agent start --pool default-agent-pool
 
 ### Configuration
 
+```bash
+# Set environment variables
+export AZURE_CLIENT_ID='your-azure-client-id'
+export AZURE_CLIENT_SECRET='your-azure-client-secret'
+export AZURE_TENANT_ID='your-azure-tenant-id'
+```
+
 ```python
-# email_monitor_example.py
-from email_monitor_prefect import EmailMonitoringService
+# Simple usage
+import asyncio
+from email_monitor_prefect import email_monitoring_flow
 
-# Configuration
-config = {
-    'client_id': 'your-azure-client-id',
-    'client_secret': 'your-azure-client-secret',
-    'tenant_id': 'your-azure-tenant-id',
-    'email_groups': ['support@company.com', 'billing@company.com'],
-    'attachments_dir': 'email_attachments',
-    'file_types': ['.pdf', '.docx', '.xlsx']  # Empty for all types
-}
-
-# The service runs automatically via Prefect every 5 minutes
+# Run once for testing
+result = asyncio.run(email_monitoring_flow(
+    client_id=os.getenv('AZURE_CLIENT_ID'),
+    client_secret=os.getenv('AZURE_CLIENT_SECRET'),
+    tenant_id=os.getenv('AZURE_TENANT_ID'),
+    email_groups=['support@company.com'],
+    attachments_dir='email_attachments',
+    file_types=['.pdf', '.docx']
+))
 ```
 
 ### Output Structure
