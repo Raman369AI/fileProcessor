@@ -1,6 +1,6 @@
 # Universal File Processor
 
-A comprehensive, modular Python library for reading and extracting content from various file formats with intelligent table detection, custom PDF processing, and Microsoft Graph API integration. Designed for minimal dependencies and maximum functionality.
+A comprehensive, modular Python library for reading and extracting content from various file formats with intelligent table detection, custom PDF processing, and 24/7 email monitoring capabilities. Designed for minimal dependencies and maximum functionality.
 
 ## 🚀 Key Features
 
@@ -9,16 +9,16 @@ A comprehensive, modular Python library for reading and extracting content from 
 - **Advanced PDF Processing**: PyMuPDF with OCR fallback for scanned documents
 - **Intelligent Table Extraction**: Pattern-based detection from unstructured data
 - **Modular Attachment Reading**: Process email attachments with custom processors
-- **Microsoft Graph API Integration**: Delta sync for cloud email processing
+- **24/7 Email Monitoring**: Prefect-based orchestration for continuous email processing
 - **OCR Capabilities**: Text extraction from images and scanned documents
 - **Resource Efficient**: Minimal dependencies with maximum functionality
 - **Multiple Output Formats**: Markdown and JSON with rich metadata
 
 ### **Email Processing Excellence**
 - **MSG File Processing**: Complete Outlook email parsing with metadata
-- **Graph API Delta Sync**: Incremental email synchronization from Microsoft 365
+- **24/7 Email Monitoring**: Continuous monitoring with Prefect orchestration
 - **Email Group Filtering**: Process emails from specific senders/groups
-- **Attachment Processing**: In-memory attachment reading without temporary files
+- **Multi-Attachment Support**: Handle multiple attachments per email with proper saving
 - **Custom PDF Processors**: Specialized handling for invoices, reports, contracts
 
 ### **Advanced Table Detection**
@@ -38,7 +38,7 @@ A comprehensive, modular Python library for reading and extracting content from 
 | **CSV** | `.csv` | Built-in csv | Auto-delimiter detection, encoding | ✅ Data quality analysis |
 | **Outlook** | `.msg` | extract-msg | Email metadata, attachment extraction | ✅ Email classification |
 | **Text** | `.txt` | Built-in | Encoding detection, table patterns | ✅ Content categorization |
-| **Email (Cloud)** | Graph API | msal + requests | Delta sync, attachment download | ✅ Real-time processing |
+| **Email (Cloud)** | Prefect + Graph API | msal + prefect | 24/7 monitoring, delta sync | ✅ Orchestrated processing |
 
 ## 📦 Installation
 
@@ -157,77 +157,119 @@ for attachment in result['processed_content']:
         print(f"Vendor: {content.metadata.get('vendor')}")
 ```
 
-### 4. Microsoft Graph API Integration
+### 4. Basic File Processing
 
 ```python
-# Initialize with Azure credentials
-processor = FileProcessor(
-    graph_client_id="your-client-id",
-    graph_client_secret="your-client-secret",
-    graph_tenant_id="your-tenant-id"
-)
-
-# Authenticate
-if processor.authenticate_graph_api():
-    # Process emails with delta sync
-    emails = processor.process_emails_from_graph(
-        email_groups=["support@company.com", "sales@company.com"]
-    )
-    
-    print(f"Processed {len(emails)} emails")
-    
-    # Get delta link for next sync
-    delta_link = processor.get_graph_delta_link()
-    # Next run will only get new/changed emails
-```
-
-### 5. Batch Processing
-
-```python
-import os
-
-# Process multiple files
-files = ["doc1.pdf", "report.xlsx", "image.png", "email.msg"]
-results = []
+# Process any file type
+files = ["document.pdf", "spreadsheet.xlsx", "image.png", "email.msg"]
 
 for file_path in files:
     if os.path.exists(file_path):
         content = processor.process_file(file_path)
-        results.append({
-            'file': file_path,
-            'type': content.file_type,
-            'tables': len(content.tables),
-            'text_length': len(content.text)
-        })
-
-# Summary report
-for result in results:
-    print(f"{result['file']}: {result['tables']} tables, {result['text_length']} chars")
+        print(f"{file_path}: {len(content.tables)} tables, {len(content.text)} chars")
 ```
 
-### 6. Command Line Usage
+### 5. Command Line Usage
 
 ```bash
-# Basic processing
+# Basic file processing
 python file_processor.py
 
-# Or run examples
+# Run file processing examples
 python example_usage.py
+
+# Run email monitoring examples
+python email_monitor_example.py
 ```
+
+## 📧 24/7 Email Monitoring Service
+
+A separate Prefect-based service for continuous email monitoring and attachment processing.
+
+### Features
+- **24/7 Operation**: Continuous monitoring using Prefect orchestration
+- **Single Instance**: Concurrency control ensures only one task runs at a time
+- **Delta Sync**: Incremental email processing using Microsoft Graph API
+- **Multi-Attachment Support**: Handles multiple attachments per email
+- **Automatic Retry**: Built-in error handling and retry mechanisms
+- **Rich Monitoring**: Prefect UI for flow monitoring and debugging
+
+### Installation
+
+```bash
+# Install additional dependencies for email monitoring
+pip install -r requirements_prefect.txt
+```
+
+### Quick Start
+
+```bash
+# 1. Start Prefect server
+prefect server start
+
+# 2. Create deployment (in another terminal)
+python email_monitor_prefect.py
+
+# 3. Start agent (in another terminal)
+prefect agent start --pool default-agent-pool
+```
+
+### Configuration
+
+```python
+# email_monitor_example.py
+from email_monitor_prefect import EmailMonitoringService
+
+# Configuration
+config = {
+    'client_id': 'your-azure-client-id',
+    'client_secret': 'your-azure-client-secret',
+    'tenant_id': 'your-azure-tenant-id',
+    'email_groups': ['support@company.com', 'billing@company.com'],
+    'attachments_dir': 'email_attachments',
+    'file_types': ['.pdf', '.docx', '.xlsx']  # Empty for all types
+}
+
+# The service runs automatically via Prefect every 5 minutes
+```
+
+### Output Structure
+
+```
+email_attachments/
+├── {message_id}_{subject}/
+│   ├── attachment1.pdf
+│   ├── attachment1.pdf.processed.json
+│   ├── attachment2.xlsx
+│   ├── attachment2.xlsx.processed.json
+│   └── processing_results.json
+```
+
+### Monitoring
+
+- **Prefect UI**: Access at http://localhost:4200 for flow monitoring
+- **Logs**: Real-time logging with structured output
+- **Artifacts**: Processing summaries with markdown reports
+- **Concurrency**: Automatic single-instance enforcement
 
 ## 🏗️ Architecture
 
 ### Core Components
 
 ```
-FileProcessor (Main Orchestrator)
+FileProcessor (Core File Processing)
 ├── AttachmentReader (Modular file processing)
 │   ├── Built-in processors (PDF, Word, Excel, etc.)
 │   └── Custom processors (Invoice, Financial, Contract)
 ├── TableExtractor (Pattern-based table detection)
 ├── OutlookMsgParser (MSG file processing)
-├── GraphApiEmailProcessor (Microsoft 365 integration)
 └── ExtractedContent (Data container)
+
+Email Monitoring Service (Separate Prefect Service)
+├── GraphEmailClient (Microsoft Graph API integration)
+├── Prefect Flow (Orchestration and scheduling)
+├── Concurrency Control (Single instance enforcement)
+└── Attachment Processing (Multi-file handling)
 ```
 
 #### **FileProcessor**
@@ -242,11 +284,11 @@ FileProcessor (Main Orchestrator)
 - In-memory processing without temporary files
 - Extensible architecture for new file formats
 
-#### **GraphApiEmailProcessor**
-- Microsoft Graph API integration
-- Delta sync for incremental email processing
-- Authentication management (MSAL)
-- Attachment downloading from cloud
+#### **Email Monitoring Service**
+- 24/7 Prefect-based orchestration
+- Microsoft Graph API integration with delta sync
+- Single instance concurrency control
+- Multi-attachment processing and saving
 
 #### **TableExtractor**
 - Multi-pattern table detection
