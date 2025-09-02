@@ -1,8 +1,6 @@
 """
-Email Monitoring Service with FastAPI and HTML Interface
-
-Enhanced version with web dashboard for monitoring email processing.
-Perfect for Windows VM environments.
+Email Monitoring Service with Local Mock Server
+Modified version that uses a local mock server instead of Microsoft Graph API
 """
 
 import os
@@ -13,7 +11,6 @@ from datetime import datetime
 from typing import Dict, List, Any
 import requests
 import asyncio
-import uuid
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -23,45 +20,33 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import uvicorn
 
-try:
-    from msal import ConfidentialClientApplication
-    HAS_MSAL = True
-except ImportError:
-    HAS_MSAL = False
-
 # Import from parent directory
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from file_processor import AttachmentReader
-
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('email_monitor.log'),
+        logging.FileHandler('email_monitor_local.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
 
-class GraphEmailClient:
-    """Microsoft Graph API client with delta query for idempotency"""
+class MockGraphEmailClient:
+    """Mock Graph API client that uses local server"""
     
-    def __init__(self, client_id: str, client_secret: str, tenant_id: str):
-        if not HAS_MSAL:
-            raise ImportError("Install msal: pip install msal")
-        
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.tenant_id = tenant_id
+    def __init__(self, mock_server_url: str = "http://localhost:5001"):
+        self.mock_server_url = mock_server_url
         self.access_token = None
         self.delta_link = None
         
         # Store delta link persistently
-        self.delta_file = Path("delta_link.txt")
+        self.delta_file = Path("delta_link_local.txt")
         self._load_delta_link()
     
     def _load_delta_link(self):
@@ -82,75 +67,61 @@ class GraphEmailClient:
             logger.warning(f"Could not save delta link: {e}")
     
     def authenticate(self) -> bool:
-        """Authenticate with Microsoft Graph API"""
+        """Mock authentication with local server"""
         try:
-            app = ConfidentialClientApplication(
-                client_id=self.client_id,
-                client_credential=self.client_secret,
-                authority=f"https://login.microsoftonline.com/{self.tenant_id}"
-            )
-            result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-            
-            if "access_token" in result:
-                self.access_token = result["access_token"]
+            # Check if mock server is healthy
+            response = requests.get(f"{self.mock_server_url}/health", timeout=5)
+            if response.status_code == 200:
+                self.access_token = "mock_token_local"
+                logger.info("Successfully connected to mock email server")
                 return True
             else:
-                logger.error(f"Auth failed: {result.get('error_description', 'Unknown')}")
+                logger.error("Mock server is not healthy")
                 return False
                 
         except Exception as e:
-            logger.error(f"Auth error: {e}")
+            logger.error(f"Cannot connect to mock server: {e}")
             return False
     
     def get_new_messages(self, email_groups: List[str] = None) -> List[Dict[str, Any]]:
-        """Get NEW messages only using delta query (ensures idempotency)"""
+        """Get NEW messages from mock server using delta query"""
         if not self.access_token:
             return []
-        
-        headers = {"Authorization": f"Bearer {self.access_token}"}
         
         # Use stored delta link for incremental sync, or start fresh
         if self.delta_link:
             url = self.delta_link
             logger.info("Using delta sync - only processing new emails")
         else:
-            url = "https://graph.microsoft.com/v1.0/me/messages/delta"
+            url = f"{self.mock_server_url}/v1.0/me/messages/delta"
             logger.info("First run - processing all emails")
         
         new_messages = []
         
         try:
-            while url:
-                response = requests.get(url, headers=headers, timeout=30)
-                response.raise_for_status()
-                data = response.json()
-                
-                # Filter out deleted items
-                messages = [msg for msg in data.get("value", []) if "@removed" not in msg]
-                
-                # Filter by email groups if specified
-                if email_groups and messages:
-                    filtered = []
-                    for msg in messages:
-                        sender = msg.get("from", {}).get("emailAddress", {}).get("address", "").lower()
-                        if any(group.lower() in sender for group in email_groups):
-                            filtered.append(msg)
-                    messages = filtered
-                
-                new_messages.extend(messages)
-                
-                # Handle pagination and delta link
-                next_link = data.get("@odata.nextLink")
-                delta_link = data.get("@odata.deltaLink")
-                
-                if delta_link:
-                    self.delta_link = delta_link
-                    self._save_delta_link()
-                    break
-                elif next_link:
-                    url = next_link
-                else:
-                    break
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Filter out deleted items
+            messages = [msg for msg in data.get("value", []) if "@removed" not in msg]
+            
+            # Filter by email groups if specified
+            if email_groups and messages:
+                filtered = []
+                for msg in messages:
+                    sender = msg.get("from", {}).get("emailAddress", {}).get("address", "").lower()
+                    if any(group.lower() in sender for group in email_groups):
+                        filtered.append(msg)
+                messages = filtered
+            
+            new_messages.extend(messages)
+            
+            # Handle delta link
+            delta_link = data.get("@odata.deltaLink")
+            if delta_link:
+                self.delta_link = delta_link
+                self._save_delta_link()
                     
         except Exception as e:
             logger.error(f"Error fetching messages: {e}")
@@ -160,15 +131,14 @@ class GraphEmailClient:
         return new_messages
     
     def get_attachments(self, message_id: str) -> List[Dict[str, Any]]:
-        """Get attachments for a message"""
+        """Get attachments for a message from mock server"""
         if not self.access_token:
             return []
         
-        headers = {"Authorization": f"Bearer {self.access_token}"}
-        url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/attachments"
+        url = f"{self.mock_server_url}/v1.0/me/messages/{message_id}/attachments"
         
         try:
-            response = requests.get(url, headers=headers, timeout=30)
+            response = requests.get(url, timeout=30)
             response.raise_for_status()
             return response.json().get("value", [])
         except Exception as e:
@@ -176,15 +146,14 @@ class GraphEmailClient:
             return []
     
     def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
-        """Download attachment content"""
+        """Download attachment content from mock server"""
         if not self.access_token:
             return b""
         
-        headers = {"Authorization": f"Bearer {self.access_token}"}
-        url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/attachments/{attachment_id}/$value"
+        url = f"{self.mock_server_url}/v1.0/me/messages/{message_id}/attachments/{attachment_id}/$value"
         
         try:
-            response = requests.get(url, headers=headers, timeout=60)
+            response = requests.get(url, timeout=60)
             response.raise_for_status()
             return response.content
         except Exception as e:
@@ -193,22 +162,19 @@ class GraphEmailClient:
 
 
 class EmailMonitor:
-    """Main email monitoring service"""
+    """Main email monitoring service using mock server"""
     
-    def __init__(self):
-        # Get config from environment
-        self.client_id = os.getenv('AZURE_CLIENT_ID')
-        self.client_secret = os.getenv('AZURE_CLIENT_SECRET')
-        self.tenant_id = os.getenv('AZURE_TENANT_ID')
-        self.email_groups = [g.strip() for g in os.getenv('EMAIL_GROUPS', '').split(',') if g.strip()]
-        self.attachments_dir = Path(os.getenv('ATTACHMENTS_DIR', 'email_attachments'))
-        self.file_types = [f.strip() for f in os.getenv('FILE_TYPES', '.pdf,.docx,.xlsx').split(',') if f.strip()]
+    def __init__(self, mock_server_url: str = "http://localhost:5001"):
+        # Configuration for local testing
+        self.email_groups = ['finance', 'reports', 'system']  # Mock email groups
+        self.attachments_dir = Path('email_attachments_local')
+        self.file_types = ['.pdf', '.docx', '.xlsx']
         
         # Create directories
         self.attachments_dir.mkdir(exist_ok=True)
         
         # Initialize components
-        self.graph_client = None
+        self.graph_client = MockGraphEmailClient(mock_server_url)
         self.attachment_reader = AttachmentReader()
         
         # Stats
@@ -220,33 +186,14 @@ class EmailMonitor:
             'errors': 0
         }
         
-        # Validate config and initialize
-        if self._validate_config():
-            self.graph_client = GraphEmailClient(self.client_id, self.client_secret, self.tenant_id)
-            logger.info("Email monitor initialized successfully")
-        else:
-            logger.error("Invalid configuration")
-    
-    def _validate_config(self) -> bool:
-        """Validate required configuration"""
-        required = ['AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_TENANT_ID']
-        missing = [var for var in required if not os.getenv(var)]
-        
-        if missing:
-            logger.error(f"Missing environment variables: {missing}")
-            return False
-        return True
+        logger.info("Local email monitor initialized successfully")
     
     async def process_emails(self):
-        """Main processing function - runs every 5 minutes"""
-        if not self.graph_client:
-            logger.error("Graph client not initialized")
-            return
-        
+        """Main processing function - runs every 30 seconds for testing"""
         try:
-            logger.info("Starting email processing cycle")
+            logger.info("Starting email processing cycle (LOCAL MODE)")
             
-            # Authenticate
+            # Authenticate with mock server
             if not self.graph_client.authenticate():
                 self.stats['errors'] += 1
                 return
@@ -289,8 +236,10 @@ class EmailMonitor:
             
             logger.info(f"Processing {len(attachments)} attachments for: {subject[:50]}")
             
-            # Use main attachments directory for all files
-            message_dir = self.attachments_dir
+            # Create message directory
+            safe_subject = "".join(c for c in subject if c.isalnum() or c in (' ', '-', '_')).rstrip()[:50]
+            message_dir = self.attachments_dir / f"{message_id[:8]}_{safe_subject}"
+            message_dir.mkdir(exist_ok=True)
             
             processed_attachments = []
             processed_count = 0
@@ -312,14 +261,8 @@ class EmailMonitor:
                 if not attachment_data:
                     continue
                 
-                # Create unique filename with date and UUID
-                date_str = datetime.now().strftime("%Y-%m-%d")
-                file_uuid = str(uuid.uuid4())[:8]
-                file_ext = os.path.splitext(attachment_name)[1]
-                unique_filename = f"{date_str}_{file_uuid}_{attachment_name}"
-                
-                # Save attachment with unique name
-                attachment_path = message_dir / unique_filename
+                # Save attachment
+                attachment_path = message_dir / attachment_name
                 attachment_path.write_bytes(attachment_data)
                 
                 # Process content
@@ -331,7 +274,7 @@ class EmailMonitor:
                 
                 # Save processed content
                 if processed.get("processed_content"):
-                    content_file = message_dir / f"{unique_filename}.processed.json"
+                    content_file = message_dir / f"{attachment_name}.processed.json"
                     content = processed["processed_content"]
                     
                     with open(content_file, 'w', encoding='utf-8') as f:
@@ -343,8 +286,7 @@ class EmailMonitor:
                         }, f, indent=2, ensure_ascii=False)
                 
                 processed_attachments.append({
-                    "original_filename": attachment_name,
-                    "saved_filename": unique_filename,
+                    "filename": attachment_name,
                     "file_type": os.path.splitext(attachment_name)[1].lower(),
                     "file_size": len(attachment_data),
                     "saved_path": str(attachment_path),
@@ -357,10 +299,6 @@ class EmailMonitor:
             
             # Save processing summary
             if processed_count > 0:
-                date_str = datetime.now().strftime("%Y-%m-%d")
-                summary_uuid = str(uuid.uuid4())[:8]
-                summary_filename = f"{date_str}_{summary_uuid}_processing_summary_{message_id[:8]}.json"
-                
                 summary = {
                     "email_info": {
                         "message_id": message_id,
@@ -372,7 +310,7 @@ class EmailMonitor:
                     "attachments": processed_attachments
                 }
                 
-                summary_file = message_dir / summary_filename
+                summary_file = message_dir / "processing_summary.json"
                 with open(summary_file, 'w', encoding='utf-8') as f:
                     json.dump(summary, f, indent=2, ensure_ascii=False)
             
@@ -385,9 +323,9 @@ monitor = EmailMonitor()
 
 # Create FastAPI app
 app = FastAPI(
-    title="Email Monitor Dashboard", 
-    description="24/7 Email Monitoring with Web Interface",
-    version="1.0.0"
+    title="Email Monitor Dashboard (LOCAL MODE)", 
+    description="24/7 Email Monitoring with Local Mock Server",
+    version="1.0.0-local"
 )
 
 # Mount static files and templates
@@ -400,23 +338,23 @@ scheduler = BackgroundScheduler()
 
 @app.on_event("startup")
 async def startup():
-    """Start monitoring every 5 minutes"""
+    """Start monitoring every 30 seconds for local testing"""
     scheduler.add_job(
         func=lambda: asyncio.create_task(monitor.process_emails()),
-        trigger=IntervalTrigger(minutes=5),
-        id='email_monitor_job',
-        name='Email Monitor',
+        trigger=IntervalTrigger(seconds=30),  # More frequent for testing
+        id='email_monitor_job_local',
+        name='Email Monitor (Local)',
         replace_existing=True
     )
     scheduler.start()
-    logger.info("✅ Email monitoring started - checking every 5 minutes")
+    logger.info("✅ Local email monitoring started - checking every 30 seconds")
 
 
 @app.on_event("shutdown")
 async def shutdown():
     """Clean shutdown"""
     scheduler.shutdown(wait=False)
-    logger.info("Email monitoring stopped")
+    logger.info("Local email monitoring stopped")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -430,6 +368,8 @@ async def get_status():
     """Detailed status API"""
     return {
         "status": "running",
+        "mode": "LOCAL_MOCK",
+        "mock_server": monitor.graph_client.mock_server_url,
         "stats": monitor.stats,
         "config": {
             "email_groups": monitor.email_groups,
@@ -437,9 +377,9 @@ async def get_status():
             "file_types": monitor.file_types
         },
         "idempotency_info": {
-            "email_deduplication": "Graph API delta queries",
+            "email_deduplication": "Mock server delta queries",
             "attachment_deduplication": "Directory-based file overwriting",
-            "delta_link_stored": monitor.graph_client.delta_link is not None if monitor.graph_client else False
+            "delta_link_stored": monitor.graph_client.delta_link is not None
         }
     }
 
@@ -448,7 +388,7 @@ async def get_status():
 async def process_now(background_tasks: BackgroundTasks):
     """Trigger immediate processing"""
     background_tasks.add_task(monitor.process_emails)
-    return {"message": "Email processing triggered immediately"}
+    return {"message": "Email processing triggered immediately (LOCAL MODE)"}
 
 
 @app.get("/recent-results")
@@ -502,97 +442,23 @@ async def get_email_details(message_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/email-json/{message_id}")
-async def get_email_json(message_id: str):
-    """Get complete JSON data for an email"""
-    try:
-        # Find the message directory
-        message_dir = None
-        for dir_path in monitor.attachments_dir.iterdir():
-            if dir_path.is_dir() and dir_path.name.startswith(message_id[:8]):
-                message_dir = dir_path
-                break
-        
-        if not message_dir:
-            raise HTTPException(status_code=404, detail="Email not found")
-        
-        # Collect all JSON files
-        result = {"email_summary": None, "attachments": []}
-        
-        # Get summary
-        summary_file = message_dir / "processing_summary.json"
-        if summary_file.exists():
-            with open(summary_file) as f:
-                result["email_summary"] = json.load(f)
-        
-        # Get all processed attachments
-        for file_path in message_dir.glob("*.processed.json"):
-            with open(file_path) as f:
-                attachment_data = json.load(f)
-                result["attachments"].append({
-                    "filename": file_path.name.replace(".processed.json", ""),
-                    "processed_content": attachment_data
-                })
-        
-        return result
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/attachment-json/{message_id}/{filename}")
-async def get_attachment_json(message_id: str, filename: str):
-    """Get JSON processing results for a specific attachment"""
-    try:
-        # Find the message directory
-        message_dir = None
-        for dir_path in monitor.attachments_dir.iterdir():
-            if dir_path.is_dir() and dir_path.name.startswith(message_id[:8]):
-                message_dir = dir_path
-                break
-        
-        if not message_dir:
-            raise HTTPException(status_code=404, detail="Email not found")
-        
-        # Find the processed JSON file
-        json_file = message_dir / f"{filename}.processed.json"
-        if not json_file.exists():
-            raise HTTPException(status_code=404, detail="Processed file not found")
-        
-        with open(json_file) as f:
-            return json.load(f)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 def main():
-    """Run the FastAPI server with web interface"""
-    print("🚀 Email Monitor Dashboard")
+    """Run the FastAPI server with local mock server"""
+    print("🚀 Email Monitor Dashboard (LOCAL MODE)")
     print("=" * 50)
     print("Features:")
-    print("• Web dashboard at http://localhost:8000")
+    print("• Web dashboard at http://localhost:8001")
+    print("• Mock email server simulation")
     print("• Real-time monitoring and stats")
     print("• JSON processing results viewer")
-    print("• Email and attachment details")
-    print("• Manual processing trigger")
-    print()
-    print("Environment variables required:")
-    print("• AZURE_CLIENT_ID")
-    print("• AZURE_CLIENT_SECRET")
-    print("• AZURE_TENANT_ID")
-    print("• EMAIL_GROUPS (comma-separated)")
+    print("• No Azure credentials required")
     print("=" * 50)
     
-    # Run FastAPI server
+    # Run FastAPI server on different port
     uvicorn.run(
-        "app.main:app",
+        "app.main_local:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=False,
         log_level="info"
     )
