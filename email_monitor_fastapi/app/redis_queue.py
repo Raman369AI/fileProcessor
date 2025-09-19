@@ -28,6 +28,8 @@ class EmailAttachmentData:
     email_id: str
     email_subject: str
     email_sender: str
+    email_sender_email: str
+    email_content: str
     email_received_date: str
     attachment_id: str
     attachment_filename: str
@@ -47,6 +49,8 @@ class EmailAttachmentData:
             "email_id": self.email_id,
             "email_subject": self.email_subject,
             "email_sender": self.email_sender,
+            "email_sender_email": self.email_sender_email,
+            "email_content": self.email_content,
             "email_received_date": self.email_received_date,
             "attachment_id": self.attachment_id,
             "attachment_filename": self.attachment_filename,
@@ -66,6 +70,8 @@ class EmailAttachmentData:
             email_id=data['email_id'],
             email_subject=data['email_subject'],
             email_sender=data['email_sender'],
+            email_sender_email=data['email_sender_email'],
+            email_content=data['email_content'],
             email_received_date=data['email_received_date'],
             attachment_id=data['attachment_id'],
             attachment_filename=data['attachment_filename'],

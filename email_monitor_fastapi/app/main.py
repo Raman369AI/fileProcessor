@@ -8,6 +8,7 @@ Perfect for Windows VM environments.
 import os
 import json
 import logging
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any
@@ -303,8 +304,20 @@ class EmailMonitor:
         """Process single message and enqueue attachments to Redis or process directly"""
         message_id = message.get("id", "")
         subject = message.get("subject", "No Subject")
-        sender = message.get("from", {}).get("emailAddress", {}).get("address", "")
+        sender_info = message.get("from", {}).get("emailAddress", {})
+        sender_email = sender_info.get("address", "")
+        sender_name = sender_info.get("name", sender_email)
         received_date = message.get("receivedDateTime", datetime.now().isoformat())
+        
+        # Get email content/body
+        email_content = ""
+        if message.get("body"):
+            email_content = message["body"].get("content", "")
+            # If HTML content, try to get plain text version or strip basic HTML
+            if message["body"].get("contentType") == "html":
+                # Simple HTML tag removal for basic cleanup
+                email_content = re.sub(r'<[^>]+>', '', email_content)
+                email_content = re.sub(r'\s+', ' ', email_content).strip()
         
         # Skip if no attachments
         if not message.get("hasAttachments", False):
@@ -321,12 +334,12 @@ class EmailMonitor:
             if self.use_redis_queue and self.redis_queue:
                 # Enqueue attachments to Redis
                 await self._enqueue_attachments_to_redis(
-                    message_id, subject, sender, received_date, attachments
+                    message_id, subject, sender_name, sender_email, email_content, received_date, attachments
                 )
             else:
                 # Process attachments directly (original behavior)
                 await self._process_attachments_directly(
-                    message_id, subject, sender, attachments
+                    message_id, subject, sender_name, sender_email, email_content, attachments
                 )
             
         except Exception as e:
@@ -334,7 +347,8 @@ class EmailMonitor:
             self.stats['errors'] += 1
     
     async def _enqueue_attachments_to_redis(self, message_id: str, subject: str, 
-                                           sender: str, received_date: str, 
+                                           sender_name: str, sender_email: str, 
+                                           email_content: str, received_date: str, 
                                            attachments: List[Dict[str, Any]]):
         """Enqueue attachments to Redis queue for processing"""
         queued_count = 0
@@ -381,7 +395,9 @@ class EmailMonitor:
                     task_id=task_id,
                     email_id=message_id,
                     email_subject=subject,
-                    email_sender=sender,
+                    email_sender=sender_name,
+                    email_sender_email=sender_email,
+                    email_content=email_content,
                     email_received_date=received_date,
                     attachment_id=attachment_id,
                     attachment_filename=attachment_name,
@@ -399,15 +415,18 @@ class EmailMonitor:
                 logger.info(f"Enqueued {queued_count}/{len(attachment_tasks)} attachments from email: {subject[:50]}")
                 
                 # Save enqueue summary
-                await self._save_enqueue_summary(message_id, subject, sender, attachment_tasks, queued_count)
+                await self._save_enqueue_summary(message_id, subject, sender_name, sender_email, attachment_tasks, queued_count)
             
         except Exception as e:
             logger.error(f"Error enqueuing attachments for message {message_id}: {e}")
             self.stats['queue_errors'] += 1
     
-    async def _save_enqueue_summary(self, message_id: str, subject: str, sender: str, 
-                                  attachment_tasks: List[EmailAttachmentData], queued_count: int):
-        """Save summary of enqueued attachments"""
+    async def _save_enqueue_summary(self, message_id: str, subject: str, sender_name: str, 
+                                  sender_email: str, attachment_tasks: List[EmailAttachmentData], 
+                                  queued_count: int):
+        """Save summary of enqueued attachments""" 
+        # Get email content from first attachment task (they all have the same email content)
+        email_content = attachment_tasks[0].email_content if attachment_tasks else ""
         try:
             date_str = datetime.now().strftime("%Y-%m-%d")
             summary_uuid = str(uuid.uuid4())[:8]
@@ -417,7 +436,10 @@ class EmailMonitor:
                 "email_info": {
                     "message_id": message_id,
                     "subject": subject,
-                    "sender": sender,
+                    "sender_name": sender_name,
+                    "sender_email": sender_email,
+                    "email_content_preview": email_content[:200] + "..." if len(email_content) > 200 else email_content,
+                    "email_content_length": len(email_content),
                     "enqueued_date": datetime.now().isoformat(),
                     "total_attachments": len(attachment_tasks),
                     "attachments_enqueued": queued_count
@@ -442,7 +464,8 @@ class EmailMonitor:
             logger.error(f"Error saving enqueue summary: {e}")
     
     async def _process_attachments_directly(self, message_id: str, subject: str, 
-                                          sender: str, attachments: List[Dict[str, Any]]):
+                                          sender_name: str, sender_email: str, 
+                                          email_content: str, attachments: List[Dict[str, Any]]):
         """Process attachments directly (original behavior)"""
         message_dir = self.attachments_dir
         processed_attachments = []
@@ -514,11 +537,14 @@ class EmailMonitor:
             summary_uuid = str(uuid.uuid4())[:8]
             summary_filename = f"{date_str}_{summary_uuid}_processing_summary_{message_id[:8]}.json"
             
-            summary = {
+                summary = {
                 "email_info": {
                     "message_id": message_id,
                     "subject": subject,
-                    "sender": sender,
+                    "sender_name": sender_name,
+                    "sender_email": sender_email,
+                    "email_content_preview": email_content[:200] + "..." if len(email_content) > 200 else email_content,
+                    "email_content_length": len(email_content),
                     "processed_date": datetime.now().isoformat(),
                     "attachments_processed": processed_count
                 },

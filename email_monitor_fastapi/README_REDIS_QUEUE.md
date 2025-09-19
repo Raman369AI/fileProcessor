@@ -86,7 +86,9 @@ Each queued item contains:
   "task_id": "abc123_def456_xyz789",
   "email_id": "email_message_id", 
   "email_subject": "Email subject line",
-  "email_sender": "sender@company.com",
+  "email_sender": "John Doe",
+  "email_sender_email": "john.doe@company.com",
+  "email_content": "Full email body/content text...",
   "email_received_date": "2025-01-19T10:30:00Z",
   "attachment_id": "attachment_graph_id",
   "attachment_filename": "document.pdf",
@@ -208,7 +210,10 @@ if queue_item:
     # Get attachment content
     content = base64.b64decode(data['attachment_content_b64'])
     
-    # Process attachment
+    # Process attachment with full email context
+    print(f"Email from: {data['email_sender']} ({data['email_sender_email']})")
+    print(f"Email subject: {data['email_subject']}")
+    print(f"Email content preview: {data['email_content'][:100]}...")
     print(f"Processing: {data['attachment_filename']}")
     print(f"MIME Type: {data['attachment_mime_type']}")
     print(f"Size: {data['attachment_size']} bytes")
