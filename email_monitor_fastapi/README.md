@@ -1,6 +1,6 @@
 # Email Monitor FastAPI Service
 
-A comprehensive email monitoring service with a beautiful web dashboard for Windows VM environments.
+A comprehensive email monitoring service with a beautiful web dashboard, Redis queue integration, and distributed attachment workers.
 
 ## Features
 
@@ -10,35 +10,75 @@ A comprehensive email monitoring service with a beautiful web dashboard for Wind
 🔄 **Idempotency**: Graph API delta queries prevent duplicate processing  
 ⚡ **Fast**: 5-minute automatic intervals with manual trigger option  
 💾 **Persistent**: Delta state survives service restarts  
+🚀 **Redis Queue**: Distributed attachment processing with worker management  
+👷 **Worker Processes**: Auto-scaling attachment workers with health monitoring  
+📁 **File Upload Monitoring**: Automatic processing of files dropped in upload directory  
+🔌 **Direct Upload API**: Web API for uploading files directly for processing  
+🤖 **AI Pipeline**: Multi-agent PDF processing integration  
+🧪 **Comprehensive Testing**: Full test suite with coverage reporting
 
 ## Quick Start
 
 ### 1. Set Environment Variables
 
 ```bash
-# Windows Command Prompt
-set AZURE_CLIENT_ID=your-client-id
-set AZURE_CLIENT_SECRET=your-client-secret
-set AZURE_TENANT_ID=your-tenant-id
-set EMAIL_GROUPS=support@company.com,billing@company.com
-set FILE_TYPES=.pdf,.docx,.xlsx
-set ATTACHMENTS_DIR=email_attachments
+# Copy and modify environment file
+cp .env.example .env
+# Edit .env with your configuration
+
+# Required (Azure AD)
+AZURE_CLIENT_ID=your-client-id
+AZURE_CLIENT_SECRET=your-client-secret
+AZURE_TENANT_ID=your-tenant-id
+EMAIL_GROUPS=support@company.com,billing@company.com
+
+# Optional (Redis Queue, Workers, and File Upload)
+USE_REDIS_QUEUE=true
+UPLOAD_DIR=file_uploads
+REDIS_HOST=localhost
+MAX_CONCURRENT_WORKERS=2
 ```
 
 ### 2. Install Dependencies
 
 ```bash
+# Basic installation
 pip install -r requirements.txt
+
+# Development installation (includes testing tools)
+pip install -r requirements_dev.txt
 ```
 
-### 3. Run Service
+### 3. Start Redis (if using queue)
 
 ```bash
-cd email_monitor_fastapi
-python -m app.main
+redis-server
 ```
 
-### 4. Open Dashboard
+### 4. Run Service
+
+```bash
+# Basic service
+python -m app.main
+
+# Service with integrated workers
+python -m app.main_with_workers
+
+# Local testing mode
+python -m app.main_local
+```
+
+### 5. Start Workers (if running separately)
+
+```bash
+# Single worker
+python attachment_worker.py
+
+# Multiple workers with management
+python worker_runner.py --standalone
+```
+
+### 6. Open Dashboard
 
 Visit: http://localhost:8000
 
@@ -49,12 +89,21 @@ Visit: http://localhost:8000
 - **Processing Stats**: Total runs, messages, and attachments processed
 - **Configuration Display**: Current email groups, file types, and storage directory
 - **Idempotency Status**: Delta sync status and error tracking
+- **Worker Status**: Live worker health and statistics
+- **Queue Metrics**: Redis queue length and processing rates
 
 ### Email Processing Results
 - **Recent Results List**: Last 10 processed emails with details
 - **Email Details**: Click to view full email information and attachments
 - **JSON Viewer**: View processed attachment content, tables, and metadata
 - **Manual Processing**: Trigger immediate email check via web interface
+- **Queue Management**: View, peek, and clear Redis queue items
+
+### Worker Management
+- **Worker Health**: Monitor worker processes and restart capabilities
+- **Performance Metrics**: Processing rates, success/error counts
+- **Queue Monitoring**: Real-time queue status and item previews
+- **Auto-scaling**: Automatic worker restart on failures
 
 ### Real-time Features
 - **Auto-refresh**: Dashboard updates every 30 seconds
@@ -62,17 +111,49 @@ Visit: http://localhost:8000
 - **Toast Notifications**: Success/error messages for user actions
 - **Responsive Design**: Works on desktop, tablet, and mobile
 
+### File Upload Monitoring
+- **Folder Watching**: Automatically detects files placed in upload directory
+- **Direct Web Upload**: Upload files directly through web API
+- **Automatic Queuing**: Files are automatically queued in Redis for processing
+- **Archive Management**: Processed files moved to archive folder
+- **Same Worker System**: Uses existing worker processes for consistent processing
+- **Generic Email Context**: Uploaded files get placeholder email metadata
+
 ## API Endpoints
 
+### Core Email Monitoring
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Main dashboard (HTML) |
-| `/status` | GET | Service status and stats (JSON) |
+| `/status` | GET | Enhanced service status with worker info |
 | `/process-now` | POST | Trigger immediate processing |
 | `/recent-results` | GET | Recent processing results |
 | `/email-details/{id}` | GET | Detailed email information |
 | `/email-json/{id}` | GET | Complete JSON data for email |
 | `/attachment-json/{id}/{filename}` | GET | Processed attachment JSON |
+
+### Redis Queue Management
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/redis-queue/status` | GET | Queue status and connection info |
+| `/redis-queue/stats` | GET | Detailed queue statistics |
+| `/redis-queue/peek?count=5` | GET | Preview queue items (non-destructive) |
+| `/redis-queue/clear` | POST | Clear all queue items |
+| `/redis-queue/health` | GET | Redis connection health check |
+
+### Worker Management
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/worker-stats` | GET | Worker processing statistics |
+| `/worker-health` | GET | Worker health and status |
+| `/worker-restart` | POST | Restart all workers |
+| `/system-overview` | GET | Complete system status |
+
+### File Upload Monitoring
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/upload-file` | POST | Upload a file for processing |
+| `/upload-status` | GET | Upload monitoring status and statistics |
 
 ## File Structure
 
@@ -80,16 +161,34 @@ Visit: http://localhost:8000
 email_monitor_fastapi/
 ├── app/
 │   ├── __init__.py
-│   └── main.py              # Main FastAPI application
+│   ├── main.py                    # Basic FastAPI application  
+│   ├── main_with_workers.py       # Enhanced version with workers
+│   ├── main_local.py              # Local testing version
+│   ├── redis_queue.py             # Redis queue management
+│   ├── pdf_multiagent_system.py   # AI PDF processing system
+│   ├── queue_models.py            # Data models for queuing
+│   └── integration_example.py     # Pipeline integration examples
 ├── templates/
-│   └── index.html           # Dashboard HTML template
-├── static/
+│   └── index.html                 # Dashboard HTML template
+├── static/                        # (created at runtime)
 │   ├── css/
-│   │   └── dashboard.css    # Dashboard styles
 │   └── js/
-│       └── dashboard.js     # Dashboard JavaScript
-├── requirements.txt         # Python dependencies
-└── README.md               # This file
+├── tests/
+│   └── test_email_monitor.py      # Comprehensive test suite
+├── attachment_worker.py           # Individual attachment worker
+├── worker_runner.py               # Worker process manager
+├── run_tests.py                   # Test runner with multiple modes
+├── requirements.txt               # Basic Python dependencies
+├── requirements_dev.txt           # Development and testing dependencies
+├── requirements_test.txt          # Legacy test dependencies
+├── .env.example                   # Environment configuration template
+├── .env.worker                    # Worker-specific configuration
+├── .env.uploads                   # File upload configuration template
+├── UPLOAD_GUIDE.md                # File upload monitoring guide
+├── test_upload.py                 # File upload testing script
+├── pytest.ini                    # Test configuration
+├── WARP.md                        # Warp AI assistant guidance
+└── README.md                      # This file
 ```
 
 ## How Idempotency Works
@@ -120,6 +219,12 @@ email_attachments/
     ├── data.xlsx
     ├── data.xlsx.processed.json
     └── processing_summary.json
+
+file_uploads/                          # File upload monitoring
+├── processed/                         # Processed files archive
+│   ├── 20241212_143022_document.pdf  # Archived processed files
+│   └── 20241212_150033_report.docx   # With timestamp prefixes
+└── (temporary files)                  # Files being processed
 ```
 
 ## Running as Windows Service
@@ -164,14 +269,42 @@ nssm start EmailMonitor
 
 ## Environment Variables
 
-| Variable | Required | Description | Example |
-|----------|----------|-------------|---------|
-| `AZURE_CLIENT_ID` | Yes | Azure app client ID | `12345678-1234-1234-1234-123456789012` |
-| `AZURE_CLIENT_SECRET` | Yes | Azure app client secret | `your-secret-key` |
-| `AZURE_TENANT_ID` | Yes | Azure tenant ID | `87654321-4321-4321-4321-210987654321` |
-| `EMAIL_GROUPS` | No | Comma-separated email filters | `support@company.com,billing@company.com` |
-| `FILE_TYPES` | No | Comma-separated file extensions | `.pdf,.docx,.xlsx` |
-| `ATTACHMENTS_DIR` | No | Storage directory | `email_attachments` |
+### Required (Azure AD)
+| Variable | Description | Example |
+|----------|-------------|--------|
+| `AZURE_CLIENT_ID` | Azure app client ID | `12345678-1234-1234-1234-123456789012` |
+| `AZURE_CLIENT_SECRET` | Azure app client secret | `your-secret-key` |
+| `AZURE_TENANT_ID` | Azure tenant ID | `87654321-4321-4321-4321-210987654321` |
+
+### Email Processing
+| Variable | Description | Default | Example |
+|----------|-------------|---------|--------|
+| `EMAIL_GROUPS` | Comma-separated email filters | `""` | `support@company.com,billing@company.com` |
+| `FILE_TYPES` | Comma-separated file extensions | `.pdf,.docx,.xlsx` | `.pdf,.docx,.xlsx,.csv` |
+| `ATTACHMENTS_DIR` | Storage directory | `email_attachments` | `email_attachments` |
+| `UPLOAD_DIR` | File upload monitoring directory | `file_uploads` | `file_uploads` |
+
+### Redis Queue & Workers
+| Variable | Description | Default | Example |
+|----------|-------------|---------|--------|
+| `USE_REDIS_QUEUE` | Enable Redis queue processing | `false` | `true` |
+| `REDIS_HOST` | Redis server host | `localhost` | `redis.example.com` |
+| `REDIS_PORT` | Redis server port | `6379` | `6379` |
+| `REDIS_DB` | Redis database number | `0` | `0` |
+| `REDIS_PASSWORD` | Redis password (if required) | `""` | `your-redis-password` |
+| `EMAIL_QUEUE_NAME` | Queue name | `email_attachments` | `email_attachments` |
+| `MAX_QUEUE_SIZE` | Maximum queue size | `1000` | `2000` |
+| `MAX_ATTACHMENT_SIZE` | Max file size (bytes) | `52428800` | `104857600` |
+| `MAX_CONCURRENT_WORKERS` | Number of worker processes | `1` | `4` |
+
+### Pipeline Configuration
+| Variable | Description | Default | Example |
+|----------|-------------|---------|--------|
+| `PIPELINE_APP_NAME` | Application name for pipeline | `EMAIL_PROCESSOR` | `CUSTOM_PROCESSOR` |
+| `PIPELINE_USER_ID` | User ID for pipeline | `worker_001` | `production_worker` |
+| `MAX_PIPELINE_RETRIES` | Maximum retry attempts | `3` | `5` |
+| `WORKER_POLL_INTERVAL` | Queue polling interval (seconds) | `5` | `10` |
+| `PROCESSING_TIMEOUT` | Max processing time (seconds) | `300` | `600` |
 
 ## Performance
 
@@ -180,4 +313,150 @@ nssm start EmailMonitor
 - **Disk Usage**: Depends on attachment volume
 - **Network**: Only during Graph API calls (every 5 minutes)
 
-Perfect for Windows VM environments where you need reliable, continuous email monitoring with a modern web interface!
+## Worker System Architecture
+
+### Processing Modes
+1. **Direct Processing**: Attachments processed immediately when emails are received
+2. **Queue Processing**: Attachments enqueued to Redis for distributed worker processing
+
+### Worker Features
+- **Distributed Processing**: Multiple workers can process attachments in parallel
+- **Auto-restart**: Failed workers automatically restart
+- **Health Monitoring**: Real-time worker status and performance metrics
+- **Pipeline Integration**: Each attachment processed with full email context
+- **MIME Type Handling**: Proper MIME type detection and processing
+- **Retry Logic**: Configurable retry attempts with exponential backoff
+
+### Queue Data Structure
+Each queued item contains:
+- Email metadata (ID, subject, sender, content, date)
+- Attachment data (filename, content, MIME type, size)
+- Processing metadata (task ID, timestamps, worker info)
+
+## Testing
+
+### Quick Testing
+```bash
+# Run all tests
+python run_tests.py --all
+
+# Run fast tests only
+python run_tests.py --fast
+
+# Run specific test categories
+python run_tests.py --unit
+python run_tests.py --integration
+python run_tests.py --worker
+python run_tests.py --api
+
+# Run with coverage
+python run_tests.py --all
+```
+
+### Test Categories
+- **Unit Tests**: Individual component testing
+- **Integration Tests**: End-to-end workflow testing
+- **API Tests**: FastAPI endpoint testing
+- **Worker Tests**: Attachment worker functionality
+- **Redis Tests**: Queue operations and reliability
+
+### Code Quality
+```bash
+# Lint code
+python run_tests.py --lint
+
+# Format code automatically
+python run_tests.py --format
+
+# Type checking
+python run_tests.py --type-check
+
+# Security checks
+python run_tests.py --security
+
+# Full CI pipeline
+python run_tests.py --ci
+```
+
+## Deployment Options
+
+### Basic Deployment
+```bash
+# Single process with direct processing
+ENV_FILE=.env python -m app.main
+```
+
+### Distributed Deployment
+```bash
+# Service with integrated workers
+ENV_FILE=.env python -m app.main_with_workers
+
+# Or run components separately:
+# Terminal 1: Main service
+ENV_FILE=.env python -m app.main
+
+# Terminal 2: Worker manager
+ENV_FILE=.env python worker_runner.py --standalone
+```
+
+### Docker Deployment
+```dockerfile
+# See included docker-compose example in README_REDIS_QUEUE.md
+docker-compose up -d
+```
+
+## Monitoring and Troubleshooting
+
+### Health Checks
+```bash
+# Application health
+curl http://localhost:8000/status
+
+# Worker health
+curl http://localhost:8000/worker-health
+
+# Redis queue health
+curl http://localhost:8000/redis-queue/health
+
+# File upload monitoring status
+curl http://localhost:8000/upload-status
+
+# Complete system overview
+curl http://localhost:8000/system-overview
+```
+
+### Log Files
+- `email_monitor.log` - Main application logs
+- `attachment_worker.log` - Worker process logs
+- Console output - Real-time service logs
+
+### Common Issues
+1. **Redis Connection**: Check Redis server status and connection settings
+2. **Worker Failures**: Review worker logs and health endpoints
+3. **Queue Backlogs**: Monitor queue length and worker processing rates
+4. **Azure AD Auth**: Verify credentials and API permissions
+
+## Integration with Your Pipeline
+
+To integrate the worker with your existing AI pipeline:
+
+1. **Replace Placeholder Code**: Update `_execute_pipeline_placeholder()` in `attachment_worker.py`
+2. **Import Your Modules**: Add your pipeline imports at the top of the worker file
+3. **Configure Processing**: Set pipeline-specific environment variables
+4. **Handle MIME Types**: Implement MIME type-specific processing logic
+5. **Process Results**: Save pipeline results to your preferred storage
+
+Example integration structure:
+```python
+# In attachment_worker.py, replace placeholder with:
+from your_pipeline import Runner, types, main_pipeline_agent
+
+# Process with email context + attachment
+result = await your_pipeline.process(
+    email_text=pipeline_input['email_context']['content'],
+    attachment_bytes=pipeline_input['attachment']['content_bytes'],
+    mime_type=pipeline_input['attachment']['mime_type']
+)
+```
+
+Perfect for production environments requiring reliable, scalable email monitoring with distributed attachment processing and comprehensive monitoring capabilities!

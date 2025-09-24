@@ -9,6 +9,8 @@ class EmailMonitorDashboard {
     init() {
         this.loadStatus();
         this.loadResults();
+        this.loadUploadStatus();
+        this.setupFileUpload();
         this.startAutoRefresh();
     }
 
@@ -288,11 +290,290 @@ class EmailMonitorDashboard {
         this.loadResults();
     }
 
+    setupFileUpload() {
+        const uploadArea = document.getElementById('upload-area');
+        const fileInput = document.getElementById('file-input');
+        
+        if (!uploadArea || !fileInput) return;
+        
+        // Click to upload
+        uploadArea.addEventListener('click', () => fileInput.click());
+        
+        // Drag and drop
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('border-primary', 'bg-light');
+        });
+        
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('border-primary', 'bg-light');
+        });
+        
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('border-primary', 'bg-light');
+            this.handleFileUpload(e.dataTransfer.files);
+        });
+        
+        // File input change
+        fileInput.addEventListener('change', (e) => {
+            this.handleFileUpload(e.target.files);
+        });
+    }
+    
+    async handleFileUpload(files) {
+        if (!files || files.length === 0) return;
+        
+        const progressContainer = document.getElementById('upload-progress');
+        const progressBar = document.getElementById('progress-bar');
+        const resultsContainer = document.getElementById('upload-results');
+        
+        progressContainer.classList.remove('d-none');
+        resultsContainer.innerHTML = '';
+        
+        let successCount = 0;
+        let errorCount = 0;
+        const results = [];
+        
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const progress = ((i + 1) / files.length) * 100;
+            progressBar.style.width = progress + '%';
+            
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const response = await fetch('/upload-file', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    successCount++;
+                    results.push({
+                        file: file.name,
+                        status: 'success',
+                        message: 'Upload successful',
+                        size: this.formatFileSize(result.size)
+                    });
+                } else {
+                    errorCount++;
+                    results.push({
+                        file: file.name,
+                        status: 'error',
+                        message: result.detail || 'Upload failed',
+                        size: this.formatFileSize(file.size)
+                    });
+                }
+            } catch (error) {
+                errorCount++;
+                results.push({
+                    file: file.name,
+                    status: 'error',
+                    message: 'Upload failed: ' + error.message,
+                    size: this.formatFileSize(file.size)
+                });
+            }
+        }
+        
+        // Display results
+        const resultsHtml = results.map(result => `
+            <div class="alert alert-${result.status === 'success' ? 'success' : 'danger'} py-2 mb-2" role="alert">
+                <small>
+                    <i class="fas fa-${result.status === 'success' ? 'check' : 'times'} me-2"></i>
+                    <strong>${result.file}</strong> (${result.size}) - ${result.message}
+                </small>
+            </div>
+        `).join('');
+        
+        resultsContainer.innerHTML = resultsHtml;
+        
+        // Hide progress bar after a delay
+        setTimeout(() => {
+            progressContainer.classList.add('d-none');
+        }, 1000);
+        
+        // Show summary toast
+        const message = `Upload complete: ${successCount} successful, ${errorCount} failed`;
+        this.showToast(message, errorCount === 0 ? 'success' : 'warning');
+        
+        // Clear file input
+        document.getElementById('file-input').value = '';
+        
+        // Refresh upload status
+        setTimeout(() => this.loadUploadStatus(), 2000);
+    }
+    
+    async loadUploadStatus() {
+        try {
+            const response = await fetch('/upload-status');
+            const data = await response.json();
+            
+            // Update upload monitoring status
+            const statusElement = document.getElementById('upload-monitoring-status');
+            if (statusElement) {
+                if (data.upload_monitoring_active) {
+                    statusElement.textContent = 'Active';
+                    statusElement.className = 'badge bg-success';
+                } else {
+                    statusElement.textContent = 'Inactive';
+                    statusElement.className = 'badge bg-warning';
+                }
+            }
+            
+            // Update processed files count
+            const countElement = document.getElementById('processed-files-count');
+            if (countElement) {
+                countElement.textContent = data.processed_files_count || 0;
+            }
+            
+            // Show/hide queue section based on Redis availability
+            const queueSection = document.getElementById('queue-section');
+            if (queueSection) {
+                queueSection.style.display = data.redis_queue_enabled ? 'block' : 'none';
+            }
+            
+            // Load queue info if Redis is available
+            if (data.redis_queue_enabled) {
+                this.loadQueueInfo();
+            }
+            
+        } catch (error) {
+            console.error('Error loading upload status:', error);
+        }
+    }
+    
+    async loadQueueInfo() {
+        try {
+            const response = await fetch('/redis-queue/status');
+            const data = await response.json();
+            
+            // Update queue length
+            const queueLengthElement = document.getElementById('queue-length');
+            if (queueLengthElement) {
+                queueLengthElement.textContent = data.queue_length || 0;
+            }
+            
+            // Update Redis status
+            const redisStatusElement = document.getElementById('redis-status');
+            if (redisStatusElement) {
+                if (data.redis_connected) {
+                    redisStatusElement.textContent = 'Connected';
+                    redisStatusElement.closest('.card').className = 'card bg-success text-white';
+                } else {
+                    redisStatusElement.textContent = 'Disconnected';
+                    redisStatusElement.closest('.card').className = 'card bg-danger text-white';
+                }
+            }
+            
+        } catch (error) {
+            console.error('Error loading queue info:', error);
+            const redisStatusElement = document.getElementById('redis-status');
+            if (redisStatusElement) {
+                redisStatusElement.textContent = 'Error';
+                redisStatusElement.closest('.card').className = 'card bg-danger text-white';
+            }
+        }
+    }
+    
+    async peekQueue() {
+        try {
+            const response = await fetch('/redis-queue/peek?count=5');
+            const data = await response.json();
+            
+            if (data.queue_peek && data.queue_peek.length > 0) {
+                const itemsHtml = data.queue_peek.map(item => `
+                    <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+                        <div>
+                            <div class="fw-bold">${item.attachment_filename}</div>
+                            <small class="text-muted">Task: ${item.task_id}</small>
+                        </div>
+                        <div class="text-end">
+                            <small>${this.formatFileSize(item.attachment_size)}</small><br>
+                            <small class="text-muted">${item.attachment_mime_type}</small>
+                        </div>
+                    </div>
+                `).join('');
+                
+                // Create modal to show queue items
+                this.showModal('Queue Preview', `
+                    <h6>Next ${data.queue_peek.length} items in queue:</h6>
+                    <div class="mt-3">${itemsHtml}</div>
+                `);
+            } else {
+                this.showToast('Queue is empty', 'info');
+            }
+        } catch (error) {
+            console.error('Error peeking queue:', error);
+            this.showError('Failed to peek queue');
+        }
+    }
+    
+    async clearQueue() {
+        if (!confirm('Are you sure you want to clear the entire queue? This cannot be undone.')) {
+            return;
+        }
+        
+        try {
+            const response = await fetch('/redis-queue/clear', { method: 'POST' });
+            const data = await response.json();
+            
+            this.showSuccess(`Cleared ${data.removed_count} items from queue`);
+            this.loadQueueInfo(); // Refresh queue info
+            
+        } catch (error) {
+            console.error('Error clearing queue:', error);
+            this.showError('Failed to clear queue');
+        }
+    }
+    
+    showModal(title, content) {
+        // Create temporary modal
+        const modalHtml = `
+            <div class="modal fade" id="tempModal" tabindex="-1">
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">${title}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">${content}</div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // Remove existing temp modal if any
+        const existingModal = document.getElementById('tempModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+        
+        // Add new modal to page
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        
+        // Show modal
+        const modal = new bootstrap.Modal(document.getElementById('tempModal'));
+        modal.show();
+        
+        // Clean up when hidden
+        document.getElementById('tempModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    }
+    
     startAutoRefresh() {
         // Refresh every 30 seconds
         this.refreshInterval = setInterval(() => {
             this.loadStatus();
             this.loadResults();
+            this.loadUploadStatus();
         }, 30000);
     }
 
@@ -380,6 +661,23 @@ function showProcessedJson(messageId) {
 
 function showAttachmentJson(filename, messageId) {
     dashboard.showAttachmentJson(filename, messageId);
+}
+
+function triggerFileUpload() {
+    document.getElementById('file-input').click();
+}
+
+function checkUploadStatus() {
+    dashboard.loadUploadStatus();
+    dashboard.showToast('Upload status refreshed', 'info');
+}
+
+function peekQueue() {
+    dashboard.peekQueue();
+}
+
+function clearQueue() {
+    dashboard.clearQueue();
 }
 
 // Initialize dashboard when page loads

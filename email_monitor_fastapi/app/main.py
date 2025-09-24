@@ -12,12 +12,17 @@ import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any
-import requests
+import httpx
 import asyncio
 import uuid
 import mimetypes
+import shutil
+from dotenv import load_dotenv
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+# Load environment variables from .env file
+load_dotenv()
+
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -31,10 +36,9 @@ try:
 except ImportError:
     HAS_MSAL = False
 
-# Import from parent directory
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-from file_processor import AttachmentReader
+# Import watchdog for folder monitoring
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 # Import Redis queue
 try:
@@ -54,6 +58,122 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+class FileUploadHandler(FileSystemEventHandler):
+    """Handles file uploads to the monitored upload folder"""
+    
+    def __init__(self, email_monitor):
+        super().__init__()
+        self.email_monitor = email_monitor
+        self.processed_files = set()  # Track processed files to avoid duplicates
+    
+    def on_created(self, event):
+        """Handle new file creation in upload folder"""
+        if event.is_directory:
+            return
+        
+        file_path = Path(event.src_path)
+        
+        # Skip temporary files, hidden files, and already processed files
+        if (file_path.name.startswith('.') or 
+            file_path.name.startswith('~') or
+            file_path.suffix.lower() in ['.tmp', '.temp'] or
+            str(file_path) in self.processed_files):
+            return
+        
+        # Check if file type is supported
+        if (self.email_monitor.file_types and 
+            file_path.suffix.lower() not in self.email_monitor.file_types):
+            logger.info(f"Skipping unsupported file type: {file_path.name}")
+            return
+        
+        # Wait a moment to ensure file is fully written
+        import time
+        time.sleep(0.5)
+        
+        try:
+            # Check if file still exists and is readable
+            if not file_path.exists():
+                return
+                
+            # Read file content
+            file_content = file_path.read_bytes()
+            if len(file_content) == 0:
+                logger.warning(f"Skipping empty file: {file_path.name}")
+                return
+            
+            # Mark as processed to avoid duplicates
+            self.processed_files.add(str(file_path))
+            
+            # Queue the uploaded file
+            asyncio.create_task(self._queue_uploaded_file(file_path, file_content))
+            
+        except Exception as e:
+            logger.error(f"Error processing uploaded file {file_path.name}: {e}")
+    
+    async def _queue_uploaded_file(self, file_path: Path, file_content: bytes):
+        """Queue an uploaded file for processing"""
+        try:
+            if not self.email_monitor.use_redis_queue or not self.email_monitor.redis_queue:
+                logger.warning("Redis queue not available for uploaded file processing")
+                return
+            
+            # Generate task ID
+            task_id = f"upload_{uuid.uuid4().hex[:16]}"
+            
+            # Get MIME type
+            mime_type, _ = mimetypes.guess_type(file_path.name)
+            if not mime_type:
+                # Fallback MIME type based on extension
+                ext_to_mime = {
+                    '.pdf': 'application/pdf',
+                    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    '.csv': 'text/csv',
+                    '.txt': 'text/plain',
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.png': 'image/png'
+                }
+                file_ext = file_path.suffix.lower()
+                mime_type = ext_to_mime.get(file_ext, 'application/octet-stream')
+            
+            # Create attachment data for uploaded file
+            attachment_data = EmailAttachmentData(
+                task_id=task_id,
+                email_id=f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                email_subject="File Upload Processing",
+                email_sender="File Upload System",
+                email_sender_email="system@upload",
+                email_content=f"Processing uploaded file: {file_path.name}",  # Generic text
+                email_received_date=datetime.now().isoformat(),
+                attachment_id=task_id,
+                attachment_filename=file_path.name,
+                attachment_content=file_content,
+                attachment_mime_type=mime_type,
+                attachment_size=len(file_content)
+            )
+            
+            # Enqueue for processing
+            success = self.email_monitor.redis_queue.enqueue_attachment(attachment_data)
+            
+            if success:
+                logger.info(f"✅ Uploaded file queued: {file_path.name} ({len(file_content)} bytes, {mime_type})")
+                self.email_monitor.stats['attachments_queued'] += 1
+                
+                # Optional: Move processed file to archive folder
+                archive_dir = self.email_monitor.upload_dir / 'processed'
+                archive_dir.mkdir(exist_ok=True)
+                archive_path = archive_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file_path.name}"
+                file_path.rename(archive_path)
+                logger.info(f"Moved processed file to: {archive_path}")
+                
+            else:
+                logger.error(f"❌ Failed to queue uploaded file: {file_path.name}")
+                
+        except Exception as e:
+            logger.error(f"Error queuing uploaded file {file_path.name}: {e}")
 
 
 class GraphEmailClient:
@@ -111,7 +231,7 @@ class GraphEmailClient:
             logger.error(f"Auth error: {e}")
             return False
     
-    def get_new_messages(self, email_groups: List[str] = None) -> List[Dict[str, Any]]:
+    async def get_new_messages(self, email_groups: List[str] = None) -> List[Dict[str, Any]]:
         """Get NEW messages only using delta query (ensures idempotency)"""
         if not self.access_token:
             return []
@@ -129,37 +249,38 @@ class GraphEmailClient:
         new_messages = []
         
         try:
-            while url:
-                response = requests.get(url, headers=headers, timeout=30)
-                response.raise_for_status()
-                data = response.json()
-                
-                # Filter out deleted items
-                messages = [msg for msg in data.get("value", []) if "@removed" not in msg]
-                
-                # Filter by email groups if specified
-                if email_groups and messages:
-                    filtered = []
-                    for msg in messages:
-                        sender = msg.get("from", {}).get("emailAddress", {}).get("address", "").lower()
-                        if any(group.lower() in sender for group in email_groups):
-                            filtered.append(msg)
-                    messages = filtered
-                
-                new_messages.extend(messages)
-                
-                # Handle pagination and delta link
-                next_link = data.get("@odata.nextLink")
-                delta_link = data.get("@odata.deltaLink")
-                
-                if delta_link:
-                    self.delta_link = delta_link
-                    self._save_delta_link()
-                    break
-                elif next_link:
-                    url = next_link
-                else:
-                    break
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                while url:
+                    response = await client.get(url, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    # Filter out deleted items
+                    messages = [msg for msg in data.get("value", []) if "@removed" not in msg]
+                    
+                    # Filter by email groups if specified
+                    if email_groups and messages:
+                        filtered = []
+                        for msg in messages:
+                            sender = msg.get("from", {}).get("emailAddress", {}).get("address", "").lower()
+                            if any(group.lower() in sender for group in email_groups):
+                                filtered.append(msg)
+                        messages = filtered
+                    
+                    new_messages.extend(messages)
+                    
+                    # Handle pagination and delta link
+                    next_link = data.get("@odata.nextLink")
+                    delta_link = data.get("@odata.deltaLink")
+                    
+                    if delta_link:
+                        self.delta_link = delta_link
+                        self._save_delta_link()
+                        break
+                    elif next_link:
+                        url = next_link
+                    else:
+                        break
                     
         except Exception as e:
             logger.error(f"Error fetching messages: {e}")
@@ -168,7 +289,7 @@ class GraphEmailClient:
         logger.info(f"Found {len(new_messages)} new messages")
         return new_messages
     
-    def get_attachments(self, message_id: str) -> List[Dict[str, Any]]:
+    async def get_attachments(self, message_id: str) -> List[Dict[str, Any]]:
         """Get attachments for a message"""
         if not self.access_token:
             return []
@@ -177,14 +298,15 @@ class GraphEmailClient:
         url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/attachments"
         
         try:
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            return response.json().get("value", [])
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                return response.json().get("value", [])
         except Exception as e:
             logger.error(f"Error getting attachments: {e}")
             return []
     
-    def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
+    async def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
         """Download attachment content"""
         if not self.access_token:
             return b""
@@ -193,9 +315,10 @@ class GraphEmailClient:
         url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/attachments/{attachment_id}/$value"
         
         try:
-            response = requests.get(url, headers=headers, timeout=60)
-            response.raise_for_status()
-            return response.content
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                return response.content
         except Exception as e:
             logger.error(f"Error downloading attachment: {e}")
             return b""
@@ -211,31 +334,41 @@ class EmailMonitor:
         self.tenant_id = os.getenv('AZURE_TENANT_ID')
         self.email_groups = [g.strip() for g in os.getenv('EMAIL_GROUPS', '').split(',') if g.strip()]
         self.attachments_dir = Path(os.getenv('ATTACHMENTS_DIR', 'email_attachments'))
+        self.upload_dir = Path(os.getenv('UPLOAD_DIR', 'file_uploads'))
         self.file_types = [f.strip() for f in os.getenv('FILE_TYPES', '.pdf,.docx,.xlsx').split(',') if f.strip()]
         
         # Redis queue configuration
         self.use_redis_queue = os.getenv('USE_REDIS_QUEUE', 'false').lower() == 'true'
         self.redis_queue = None
         
+        # File upload monitoring
+        self.file_observer = None
+        self.upload_handler = None
+        
         # Create directories
         self.attachments_dir.mkdir(exist_ok=True)
+        self.upload_dir.mkdir(exist_ok=True)
         
         # Initialize components
         self.graph_client = None
-        self.attachment_reader = AttachmentReader()
         
         # Initialize Redis queue if enabled
+        logger.info(f"Redis queue configuration: USE_REDIS_QUEUE={self.use_redis_queue}, HAS_REDIS_QUEUE={HAS_REDIS_QUEUE}")
         if self.use_redis_queue:
             try:
                 if HAS_REDIS_QUEUE:
                     self.redis_queue = RedisEmailQueue()
-                    logger.info("Redis queue initialized successfully")
+                    logger.info("✅ Redis queue initialized successfully")
                 else:
-                    logger.warning("Redis queue requested but not available. Install redis: pip install redis")
+                    logger.warning("❌ Redis queue requested but module not available. Check import path")
                     self.use_redis_queue = False
             except Exception as e:
-                logger.error(f"Failed to initialize Redis queue: {e}")
+                logger.error(f"❌ Failed to initialize Redis queue: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 self.use_redis_queue = False
+        else:
+            logger.info("Redis queue disabled in configuration")
         
         # Stats
         self.stats = {
@@ -249,11 +382,12 @@ class EmailMonitor:
         }
         
         # Validate config and initialize
-        if self._validate_config():
+        self.azure_configured = self._validate_config()
+        if self.azure_configured:
             self.graph_client = GraphEmailClient(self.client_id, self.client_secret, self.tenant_id)
-            logger.info("Email monitor initialized successfully")
+            logger.info("Email monitor initialized successfully with Azure integration")
         else:
-            logger.error("Invalid configuration")
+            logger.info("Email monitor initialized in demo mode (no Azure integration)")
     
     def _validate_config(self) -> bool:
         """Validate required configuration"""
@@ -261,14 +395,24 @@ class EmailMonitor:
         missing = [var for var in required if not os.getenv(var)]
         
         if missing:
-            logger.error(f"Missing environment variables: {missing}")
-            return False
+            logger.warning(f"Missing Azure environment variables: {missing}")
+            logger.info("Running in demo mode - email monitoring will be disabled")
+            return False  # Will run without email monitoring
         return True
+    
+    def _write_json_file(self, file_path, data):
+        """Helper method to write JSON file synchronously (for use in thread executor)"""
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
     
     async def process_emails(self):
         """Main processing function - runs every 5 minutes"""
+        if not self.azure_configured:
+            logger.info("Skipping email processing - running in demo mode (no Azure config)")
+            return
+            
         if not self.graph_client:
-            logger.error("Graph client not initialized")
+            logger.error("Graph client not initialized despite Azure config")
             return
         
         try:
@@ -280,7 +424,7 @@ class EmailMonitor:
                 return
             
             # Get only NEW messages (idempotency handled by delta query)
-            messages = self.graph_client.get_new_messages(self.email_groups)
+            messages = await self.graph_client.get_new_messages(self.email_groups)
             
             if not messages:
                 logger.info("No new messages to process")
@@ -325,7 +469,7 @@ class EmailMonitor:
         
         try:
             # Get attachments
-            attachments = self.graph_client.get_attachments(message_id)
+            attachments = await self.graph_client.get_attachments(message_id)
             if not attachments:
                 return
             
@@ -366,7 +510,7 @@ class EmailMonitor:
                         continue
                 
                 # Download attachment
-                attachment_data = self.graph_client.download_attachment(message_id, attachment_id)
+                attachment_data = await self.graph_client.download_attachment(message_id, attachment_id)
                 
                 if not attachment_data:
                     continue
@@ -457,8 +601,8 @@ class EmailMonitor:
             }
             
             summary_file = self.attachments_dir / summary_filename
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                json.dump(summary, f, indent=2, ensure_ascii=False)
+            # Use thread executor for file I/O to avoid blocking
+            await asyncio.to_thread(self._write_json_file, summary_file, summary)
                 
         except Exception as e:
             logger.error(f"Error saving enqueue summary: {e}")
@@ -467,7 +611,12 @@ class EmailMonitor:
                                           sender_name: str, sender_email: str, 
                                           email_content: str, attachments: List[Dict[str, Any]]):
         """Process attachments directly (original behavior)"""
-        message_dir = self.attachments_dir
+        # Create unique directory for this message
+        safe_subject = "".join(c for c in subject if c.isalnum() or c in (' ', '-', '_')).strip()[:50]
+        message_dir_name = f"{message_id[:8]}_{safe_subject}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        message_dir = self.attachments_dir / message_dir_name
+        message_dir.mkdir(exist_ok=True)
+        
         processed_attachments = []
         processed_count = 0
         
@@ -481,7 +630,7 @@ class EmailMonitor:
                     continue
             
             # Download attachment
-            attachment_data = self.graph_client.download_attachment(
+            attachment_data = await self.graph_client.download_attachment(
                 message_id, attachment.get("id", "")
             )
             
@@ -496,27 +645,14 @@ class EmailMonitor:
             
             # Save attachment with unique name
             attachment_path = message_dir / unique_filename
-            attachment_path.write_bytes(attachment_data)
+            # Use thread executor for file I/O to avoid blocking
+            await asyncio.to_thread(attachment_path.write_bytes, attachment_data)
             
-            # Process content
-            processed = self.attachment_reader.read_attachment(
-                attachment_data, 
-                attachment_name,
-                {"email_id": message_id, "email_subject": subject}
-            )
-            
-            # Save processed content
-            if processed.get("processed_content"):
-                content_file = message_dir / f"{unique_filename}.processed.json"
-                content = processed["processed_content"]
-                
-                with open(content_file, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        "text": content.text,
-                        "tables": content.tables,
-                        "metadata": content.metadata,
-                        "file_type": content.file_type
-                    }, f, indent=2, ensure_ascii=False)
+            # Skip content processing - just save the attachment
+            processed = {
+                "processing_method": "file_save",
+                "errors": []
+            }
             
             processed_attachments.append({
                 "original_filename": attachment_name,
@@ -537,7 +673,7 @@ class EmailMonitor:
             summary_uuid = str(uuid.uuid4())[:8]
             summary_filename = f"{date_str}_{summary_uuid}_processing_summary_{message_id[:8]}.json"
             
-                summary = {
+            summary = {
                 "email_info": {
                     "message_id": message_id,
                     "subject": subject,
@@ -552,8 +688,8 @@ class EmailMonitor:
             }
             
             summary_file = message_dir / summary_filename
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                json.dump(summary, f, indent=2, ensure_ascii=False)
+            # Use thread executor for file I/O to avoid blocking
+            await asyncio.to_thread(self._write_json_file, summary_file, summary)
 
 
 # Initialize monitor
@@ -574,11 +710,18 @@ templates = Jinja2Templates(directory="templates")
 scheduler = BackgroundScheduler()
 
 
+def run_async_job():
+    """Wrapper to run async process_emails in a new event loop"""
+    try:
+        asyncio.run(monitor.process_emails())
+    except Exception as e:
+        logger.error(f"Error in scheduled email processing: {e}")
+
 @app.on_event("startup")
 async def startup():
-    """Start monitoring every 5 minutes"""
+    """Start monitoring every 5 minutes and file upload monitoring"""
     scheduler.add_job(
-        func=lambda: asyncio.create_task(monitor.process_emails()),
+        func=run_async_job,
         trigger=IntervalTrigger(minutes=5),
         id='email_monitor_job',
         name='Email Monitor',
@@ -586,6 +729,20 @@ async def startup():
     )
     scheduler.start()
     logger.info("✅ Email monitoring started - checking every 5 minutes")
+    
+    # Start file upload monitoring
+    if monitor.use_redis_queue and monitor.redis_queue:
+        monitor.upload_handler = FileUploadHandler(monitor)
+        monitor.file_observer = Observer()
+        monitor.file_observer.schedule(
+            monitor.upload_handler, 
+            str(monitor.upload_dir), 
+            recursive=False
+        )
+        monitor.file_observer.start()
+        logger.info(f"✅ File upload monitoring started for: {monitor.upload_dir}")
+    else:
+        logger.warning("⚠️  File upload monitoring disabled (Redis queue not available)")
 
 
 @app.on_event("shutdown")
@@ -593,6 +750,12 @@ async def shutdown():
     """Clean shutdown"""
     scheduler.shutdown(wait=False)
     logger.info("Email monitoring stopped")
+    
+    # Stop file upload monitoring
+    if monitor.file_observer:
+        monitor.file_observer.stop()
+        monitor.file_observer.join()
+        logger.info("File upload monitoring stopped")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -610,8 +773,10 @@ async def get_status():
         "config": {
             "email_groups": monitor.email_groups,
             "attachments_dir": str(monitor.attachments_dir),
+            "upload_dir": str(monitor.upload_dir),
             "file_types": monitor.file_types,
-            "redis_queue_enabled": monitor.use_redis_queue
+            "redis_queue_enabled": monitor.use_redis_queue,
+            "file_upload_monitoring": monitor.file_observer is not None and monitor.file_observer.is_alive() if monitor.file_observer else False
         },
         "idempotency_info": {
             "email_deduplication": "Graph API delta queries",
@@ -644,13 +809,25 @@ async def get_recent_results():
     results = []
     
     try:
+        # Check for both summary files in subdirectories and root directory files
         for message_dir in monitor.attachments_dir.iterdir():
             if message_dir.is_dir():
+                # Check for processing summary in subdirectory
                 summary_file = message_dir / "processing_summary.json"
                 if summary_file.exists():
                     with open(summary_file) as f:
                         summary = json.load(f)
                         results.append(summary["email_info"])
+        
+        # Also check for summary files directly in root directory (legacy format)
+        for summary_file in monitor.attachments_dir.glob("*_processing_summary_*.json"):
+            if summary_file.is_file():
+                try:
+                    with open(summary_file) as f:
+                        summary = json.load(f)
+                        results.append(summary.get("email_info", {}))
+                except Exception:
+                    continue
         
         # Sort by processed date
         results.sort(key=lambda x: x.get("processed_date", ""), reverse=True)
@@ -842,6 +1019,75 @@ async def redis_queue_health_check():
         }
 
 
+@app.post("/upload-file")
+async def upload_file(file: UploadFile = File(...)):
+    """Upload a file for processing via the web interface"""
+    if not monitor.use_redis_queue or not monitor.redis_queue:
+        raise HTTPException(status_code=400, detail="File upload requires Redis queue to be enabled")
+    
+    # Check file type if filtering is enabled
+    if monitor.file_types:
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        if file_ext not in monitor.file_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Unsupported file type {file_ext}. Allowed types: {', '.join(monitor.file_types)}"
+            )
+    
+    try:
+        # Read file content
+        file_content = await file.read()
+        
+        if len(file_content) == 0:
+            raise HTTPException(status_code=400, detail="Empty file not allowed")
+        
+        # Save file to upload directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_filename = f"{timestamp}_{file.filename}"
+        file_path = monitor.upload_dir / unique_filename
+        
+        with open(file_path, 'wb') as f:
+            f.write(file_content)
+        
+        # The FileUploadHandler will pick up this file automatically
+        # Give it a moment to process
+        await asyncio.sleep(0.1)
+        
+        return {
+            "message": "File uploaded successfully and queued for processing",
+            "filename": file.filename,
+            "saved_as": unique_filename,
+            "size": len(file_content),
+            "upload_time": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.get("/upload-status")
+async def get_upload_status():
+    """Get file upload monitoring status"""
+    upload_monitoring_active = (
+        monitor.file_observer is not None and 
+        monitor.file_observer.is_alive() if monitor.file_observer else False
+    )
+    
+    processed_dir = monitor.upload_dir / 'processed'
+    processed_count = len(list(processed_dir.glob('*'))) if processed_dir.exists() else 0
+    
+    return {
+        "upload_dir": str(monitor.upload_dir),
+        "upload_monitoring_active": upload_monitoring_active,
+        "redis_queue_enabled": monitor.use_redis_queue,
+        "supported_file_types": monitor.file_types,
+        "processed_files_count": processed_count,
+        "processed_files_dir": str(processed_dir) if processed_dir.exists() else None
+    }
+
+
 def main():
     """Run the FastAPI server with web interface"""
     print("🚀 Email Monitor Dashboard with Redis Queue Support")
@@ -854,6 +1100,8 @@ def main():
     print("• Manual processing trigger")
     print("• Redis queue for attachment processing")
     print("• Queue monitoring and management APIs")
+    print("• File upload monitoring (watchdog)")
+    print("• Direct file upload via web API")
     print()
     print("Environment variables required:")
     print("• AZURE_CLIENT_ID")
@@ -861,8 +1109,9 @@ def main():
     print("• AZURE_TENANT_ID")
     print("• EMAIL_GROUPS (comma-separated)")
     print()
-    print("Environment variables optional (Redis):")
+    print("Environment variables optional (Redis + Upload):")
     print("• USE_REDIS_QUEUE=true (enable Redis queue)")
+    print("• UPLOAD_DIR=file_uploads (file upload directory)")
     print("• REDIS_HOST=localhost")
     print("• REDIS_PORT=6379")
     print("• REDIS_DB=0")
@@ -877,6 +1126,10 @@ def main():
     print("• GET /redis-queue/peek?count=5 - Peek queue items")
     print("• POST /redis-queue/clear - Clear queue")
     print("• GET /redis-queue/health - Health check")
+    print()
+    print("File Upload APIs:")
+    print("• POST /upload-file - Upload file for processing")
+    print("• GET /upload-status - Upload monitoring status")
     print("=" * 60)
     
     # Run FastAPI server
